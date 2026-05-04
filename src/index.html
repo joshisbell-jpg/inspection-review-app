@@ -1,0 +1,1376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inspection Review</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    :root {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f5f5f0;
+      --bg-tertiary: #eaeae5;
+      --text-primary: #1a1a1a;
+      --text-secondary: #666660;
+      --text-tertiary: #999990;
+      --border: #d4d4cf;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --success: #16a34a;
+      --success-bg: #dcfce7;
+      --warning: #ca8a04;
+      --warning-bg: #fef9c3;
+      --danger: #dc2626;
+      --danger-bg: #fee2e2;
+      --radius: 8px;
+      --radius-lg: 12px;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-primary: #1a1a1a;
+        --bg-secondary: #262626;
+        --bg-tertiary: #333333;
+        --text-primary: #f5f5f0;
+        --text-secondary: #a3a39c;
+        --text-tertiary: #737370;
+        --border: #404040;
+        --success-bg: #14532d;
+        --warning-bg: #422006;
+        --danger-bg: #450a0a;
+      }
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    
+    .titlebar {
+      -webkit-app-region: drag;
+      height: 38px;
+      background: var(--bg-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+    
+    .container { max-width: 1000px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+    .subtitle { color: var(--text-secondary); margin-bottom: 24px; }
+    
+    .card {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    
+    .card-title { font-size: 16px; font-weight: 600; }
+    
+    .badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    
+    .badge-info { background: #dbeafe; color: #1e40af; }
+    .badge-success { background: var(--success-bg); color: var(--success); }
+    .badge-warning { background: var(--warning-bg); color: var(--warning); }
+    
+    .input-section { margin-bottom: 20px; }
+    .input-section label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+    
+    input[type="text"], textarea {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-family: inherit;
+      font-size: 14px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    
+    textarea { min-height: 80px; resize: vertical; }
+    
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    
+    .input-help {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+    
+    .context-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    
+    .context-field input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 14px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    
+    .context-field label {
+      display: block;
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+    
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      font-size: 15px;
+      font-weight: 500;
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled { background: var(--text-tertiary); cursor: not-allowed; }
+    .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); }
+    .btn-secondary:hover { background: var(--border); }
+    .btn-warning { background: var(--warning); color: white; }
+    .btn-warning:hover { background: #a16207; }
+    .btn-success { background: var(--success); color: white; }
+    .btn-success:hover { background: #15803d; }
+    
+    .login-section {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-top: 20px;
+      display: none;
+    }
+    .login-section.active { display: block; }
+    .login-section h3 { color: var(--warning); font-size: 15px; margin-bottom: 8px; }
+    .login-section p { font-size: 14px; margin-bottom: 12px; }
+    .login-section .btn { margin-right: 10px; margin-top: 8px; }
+    
+    .error-box {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-top: 16px;
+      display: none;
+    }
+    .error-box.active { display: block; }
+    .error-box h4 { color: var(--danger); margin-bottom: 8px; }
+    .error-box .btn { margin-top: 12px; margin-right: 10px; }
+    
+    .progress-section { display: none; }
+    .progress-section.active { display: block; }
+    
+    .progress-bar-container {
+      background: var(--bg-tertiary);
+      border-radius: 20px;
+      height: 8px;
+      overflow: hidden;
+      margin: 16px 0;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 20px;
+      transition: width 0.3s ease;
+    }
+    
+    .progress-status { font-size: 14px; color: var(--text-secondary); }
+    .progress-items { margin-top: 16px; }
+    
+    .progress-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--bg-tertiary);
+    }
+    .progress-item:last-child { border-bottom: none; }
+    
+    .progress-icon {
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .progress-icon.pending { color: var(--text-tertiary); }
+    .progress-icon.loading { color: var(--accent); }
+    .progress-icon.done { color: var(--success); }
+    .progress-icon.error { color: var(--danger); }
+    
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--bg-tertiary);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    .results-section { display: none; }
+    .results-section.active { display: block; }
+    
+    .issue-list { list-style: none; }
+    .issue-item {
+      padding: 16px;
+      border-bottom: 1px solid var(--bg-tertiary);
+    }
+    .issue-item:last-child { border-bottom: none; }
+
+    .issue-top { display: flex; gap: 12px; align-items: flex-start; }
+    .issue-number {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--bg-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+    .issue-content { flex: 1; }
+    .issue-location { font-weight: 600; margin-bottom: 2px; }
+    .issue-description { font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
+    .issue-meta { font-size: 12px; color: var(--text-tertiary); margin-bottom: 8px; }
+    .issue-meta span { margin-right: 12px; }
+    .issue-comparison {
+      font-size: 13px;
+      padding: 6px 10px;
+      border-radius: var(--radius);
+      margin-bottom: 8px;
+      display: inline-block;
+    }
+    .issue-comparison.new-issue { background: var(--warning-bg); color: var(--warning); }
+    .issue-comparison.existing { background: var(--bg-tertiary); color: var(--text-secondary); }
+    .issue-comparison.unclear { background: var(--bg-tertiary); color: var(--text-tertiary); font-style: italic; }
+
+    .severity-badge {
+      flex-shrink: 0;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .severity-badge.minor { background: var(--bg-tertiary); color: var(--text-secondary); }
+    .severity-badge.moderate { background: var(--warning-bg); color: var(--warning); }
+    .severity-badge.major { background: var(--danger-bg); color: var(--danger); }
+
+    .decision-buttons { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .decision-btn {
+      padding: 6px 14px;
+      border: 2px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--text-primary);
+    }
+    .decision-btn:hover { border-color: var(--text-secondary); }
+    .decision-btn.selected-tenant { border-color: var(--danger); background: var(--danger-bg); color: var(--danger); }
+    .decision-btn.selected-owner { border-color: var(--accent); background: #dbeafe; color: var(--accent); }
+    .decision-btn.selected-wear { border-color: var(--success); background: var(--success-bg); color: var(--success); }
+    .decision-btn.selected-skip { border-color: var(--text-tertiary); background: var(--bg-tertiary); color: var(--text-tertiary); }
+
+    .review-summary {
+      background: var(--bg-secondary);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-top: 20px;
+      position: sticky;
+      bottom: 0;
+    }
+    .review-summary h3 { font-size: 15px; margin-bottom: 12px; }
+    .summary-counts { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+    .summary-count {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+    }
+    .summary-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .summary-dot.tenant { background: var(--danger); }
+    .summary-dot.owner { background: var(--accent); }
+    .summary-dot.wear { background: var(--success); }
+    .summary-dot.skip { background: var(--text-tertiary); }
+    .summary-dot.unreviewed { background: var(--border); }
+    .summary-progress { font-size: 13px; color: var(--text-secondary); }
+    
+    .action-buttons { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+
+    .or-divider {
+      display: flex; align-items: center; gap: 12px; margin: 12px 0;
+      color: var(--text-tertiary); font-size: 13px; font-weight: 500;
+    }
+    .or-divider::before, .or-divider::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+    .pdf-upload-area {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .pdf-upload-area input[type="file"] { display: none; }
+    .pdf-upload-btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 18px; border: 2px dashed var(--border); border-radius: var(--radius);
+      background: var(--bg-secondary); color: var(--text-secondary);
+      font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s ease;
+    }
+    .pdf-upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .pdf-upload-btn.has-file { border-color: var(--success); color: var(--success); border-style: solid; background: var(--success-bg); }
+    .pdf-file-name {
+      font-size: 13px; color: var(--text-secondary); margin-top: 6px;
+    }
+
+    /* AI backend badge + settings */
+    .ai-header-row {
+      display: flex; align-items: center; gap: 8px;
+      position: absolute; top: 8px; right: 16px;
+      -webkit-app-region: no-drag;
+    }
+    .ai-badge {
+      font-size: 11px; padding: 3px 10px; border-radius: 12px; font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .ai-badge.gemma { background: #dbeafe; color: #1e40af; }
+    .ai-badge.claude { background: #ede9fe; color: #6d28d9; }
+    .ai-gear-btn {
+      background: none; border: none; cursor: pointer; padding: 4px;
+      color: var(--text-tertiary); font-size: 16px; line-height: 1;
+      border-radius: 4px; transition: color 0.15s;
+    }
+    .ai-gear-btn:hover { color: var(--text-primary); }
+
+    .ai-settings-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.4); z-index: 1000;
+      align-items: center; justify-content: center;
+    }
+    .ai-settings-overlay.active { display: flex; }
+    .ai-settings-modal {
+      background: var(--bg-primary); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 24px; width: 340px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .ai-settings-modal h3 { font-size: 16px; margin-bottom: 16px; }
+    .ai-pin-input {
+      width: 100%; padding: 10px 12px; font-size: 20px; text-align: center;
+      letter-spacing: 8px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-secondary); color: var(--text-primary);
+    }
+    .ai-pin-input:focus { outline: none; border-color: var(--accent); }
+    .ai-pin-error {
+      color: var(--danger); font-size: 13px; margin-top: 6px; display: none;
+    }
+    .ai-backend-chooser { display: none; }
+    .ai-backend-chooser.active { display: block; }
+    .ai-backend-option {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px; border: 2px solid var(--border); border-radius: var(--radius);
+      cursor: pointer; margin-bottom: 8px; transition: all 0.15s;
+    }
+    .ai-backend-option:hover { border-color: var(--accent); }
+    .ai-backend-option.selected { border-color: var(--accent); background: #eff6ff; }
+    @media (prefers-color-scheme: dark) {
+      .ai-backend-option.selected { background: #1e3a5f; }
+    }
+    .ai-backend-option .radio {
+      width: 18px; height: 18px; border-radius: 50%;
+      border: 2px solid var(--border); display: flex;
+      align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .ai-backend-option.selected .radio {
+      border-color: var(--accent);
+    }
+    .ai-backend-option.selected .radio::after {
+      content: ''; width: 10px; height: 10px; border-radius: 50%;
+      background: var(--accent);
+    }
+    .ai-backend-label { font-weight: 500; font-size: 14px; }
+    .ai-backend-desc { font-size: 12px; color: var(--text-secondary); }
+    .ai-ollama-error {
+      color: var(--danger); font-size: 13px; padding: 8px 12px;
+      background: var(--danger-bg); border-radius: var(--radius);
+      margin-top: 8px; display: none;
+    }
+    .ai-settings-close {
+      margin-top: 16px; width: 100%; padding: 8px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius); cursor: pointer; font-size: 14px;
+      color: var(--text-primary);
+    }
+    .ai-settings-close:hover { background: var(--border); }
+  </style>
+</head>
+<body>
+  <div class="titlebar" style="position: relative;">
+    Inspection Review Tool
+    <div class="ai-header-row">
+      <span class="ai-badge gemma" id="ai-badge">AI: Gemma 4</span>
+      <button class="ai-gear-btn" id="ai-gear-btn" title="AI Settings">&#9881;</button>
+    </div>
+  </div>
+
+  <!-- AI Settings Modal -->
+  <div class="ai-settings-overlay" id="ai-settings-overlay">
+    <div class="ai-settings-modal">
+      <h3>AI Settings</h3>
+
+      <!-- PIN gate -->
+      <div id="ai-pin-gate">
+        <label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:8px;">Enter PIN to access settings</label>
+        <input type="password" class="ai-pin-input" id="ai-pin-input" maxlength="4" placeholder="----" inputmode="numeric">
+        <div class="ai-pin-error" id="ai-pin-error">Incorrect PIN</div>
+      </div>
+
+      <!-- Backend chooser (hidden until PIN correct) -->
+      <div class="ai-backend-chooser" id="ai-backend-chooser">
+        <div class="ai-backend-option" data-backend="gemma" id="opt-gemma">
+          <div class="radio"></div>
+          <div>
+            <div class="ai-backend-label">Gemma 4 (Local)</div>
+            <div class="ai-backend-desc">Runs via Ollama — free, no API costs</div>
+          </div>
+        </div>
+        <div class="ai-backend-option" data-backend="claude" id="opt-claude">
+          <div class="radio"></div>
+          <div>
+            <div class="ai-backend-label">Claude API</div>
+            <div class="ai-backend-desc">Anthropic cloud — higher accuracy, API costs</div>
+          </div>
+        </div>
+        <div class="ai-ollama-error" id="ai-ollama-error">Gemma 4 requires Ollama to be running locally. Start Ollama and try again.</div>
+      </div>
+
+      <button class="ai-settings-close" id="ai-settings-close">Close</button>
+    </div>
+  </div>
+  
+  <div class="container">
+    <h1>Inspection Review</h1>
+    <p class="subtitle">Paste inspection links to analyze and generate reports</p>
+    
+    <div class="card" id="input-section">
+      <!-- Current Inspection -->
+      <div class="input-section">
+        <div class="card-header" style="margin-bottom: 12px;">
+          <span class="card-title">Current Inspection</span>
+          <span class="badge badge-info" id="current-status">Required</span>
+        </div>
+        <label for="current-link">Paste the Zinspector/AppFolio URL</label>
+        <input type="text" id="current-link" placeholder="https://isbellrentals.appfolio.com/inspections/6461">
+        <div class="or-divider">OR</div>
+        <div class="pdf-upload-area">
+          <input type="file" id="current-pdf" accept=".pdf">
+          <label for="current-pdf" class="pdf-upload-btn" id="current-pdf-btn">Upload Inspection PDF</label>
+        </div>
+        <div class="pdf-file-name" id="current-pdf-name"></div>
+        <p class="input-help">Paste a URL for quick review, or upload the PDF for thorough analysis</p>
+      </div>
+
+      <div style="border-top: 1px solid var(--border); margin: 20px 0;"></div>
+
+      <!-- Previous Inspections -->
+      <div class="input-section">
+        <div class="card-header" style="margin-bottom: 12px;">
+          <span class="card-title">Previous Inspections</span>
+          <span class="badge" id="previous-count" style="background: var(--bg-tertiary); color: var(--text-secondary);">Optional</span>
+        </div>
+        <label for="previous-links">Paste previous inspection links (one per line)</label>
+        <textarea id="previous-links" placeholder="https://isbellrentals.appfolio.com/inspections/6234
+https://isbellrentals.appfolio.com/inspections/5890"></textarea>
+        <div class="or-divider">OR</div>
+        <div class="pdf-upload-area">
+          <input type="file" id="previous-pdf" accept=".pdf" multiple>
+          <label for="previous-pdf" class="pdf-upload-btn" id="previous-pdf-btn">Upload Previous Inspection PDF(s)</label>
+        </div>
+        <div class="pdf-file-name" id="previous-pdf-name"></div>
+        <p class="input-help">Add move-in or previous inspections to compare. Leave empty for standalone review.</p>
+      </div>
+      
+      <details style="margin-top: 16px;">
+        <summary style="cursor: pointer; font-size: 14px; color: var(--text-secondary);">+ Add property context (optional)</summary>
+        <div class="context-grid">
+          <div class="context-field">
+            <label>Tenant name</label>
+            <input type="text" id="tenant-name" placeholder="Marcus Thompson">
+          </div>
+          <div class="context-field">
+            <label>Security deposit</label>
+            <input type="number" id="deposit" placeholder="1800">
+          </div>
+          <div class="context-field">
+            <label>Lease start</label>
+            <input type="date" id="lease-start">
+          </div>
+          <div class="context-field">
+            <label>Lease end</label>
+            <input type="date" id="lease-end">
+          </div>
+        </div>
+      </details>
+      
+      <div style="margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap;">
+        <button class="btn btn-warning" id="login-btn" disabled>Step 1: Login to Platforms</button>
+        <button class="btn btn-primary" id="start-btn" disabled>Step 2: Process Inspection</button>
+      </div>
+      
+      <div class="login-section" id="login-prompt">
+        <h3>⚠️ Login Required</h3>
+        <p>Browser windows opened. Log in to AppFolio/Zinspector, then click Continue.</p>
+        <button class="btn btn-success" id="continue-btn">I'm Logged In - Continue</button>
+        <button class="btn btn-secondary" id="cancel-login-btn">Cancel</button>
+      </div>
+    </div>
+    
+    <div class="card progress-section" id="progress-section">
+      <div class="card-header">
+        <span class="card-title">Processing</span>
+        <span class="badge badge-warning" id="progress-badge">In progress</span>
+      </div>
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+      </div>
+      <p class="progress-status" id="progress-status">Initializing...</p>
+      <div class="progress-items" id="progress-items"></div>
+      <div class="error-box" id="error-box">
+        <h4>Processing Failed</h4>
+        <p id="error-message">An error occurred.</p>
+        <button class="btn btn-warning" id="retry-btn">Retry</button>
+        <button class="btn btn-secondary" id="back-btn">Back to Start</button>
+      </div>
+    </div>
+    
+    <div class="results-section" id="results-section">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Review Results</span>
+          <span class="badge badge-success">Complete</span>
+        </div>
+        <div id="results-container"></div>
+        <div class="action-buttons">
+          <button class="btn btn-primary" id="copy-owner-email">Copy Owner Email</button>
+          <button class="btn btn-secondary" id="copy-tenant-email">Copy Tenant Email</button>
+          <button class="btn btn-secondary" id="export-json">Export JSON</button>
+          <button class="btn btn-success" id="save-to-crm">Save to CRM</button>
+          <button class="btn btn-secondary" id="start-new">New Review</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    // ============================================
+    // AI Backend Settings
+    // ============================================
+    let aiBackend = 'gemma'; // will be loaded from config
+    let aiSettingsUnlocked = false;
+
+    const aiBadge = document.getElementById('ai-badge');
+    const aiGearBtn = document.getElementById('ai-gear-btn');
+    const aiOverlay = document.getElementById('ai-settings-overlay');
+    const aiPinGate = document.getElementById('ai-pin-gate');
+    const aiPinInput = document.getElementById('ai-pin-input');
+    const aiPinError = document.getElementById('ai-pin-error');
+    const aiChooser = document.getElementById('ai-backend-chooser');
+    const aiOllamaError = document.getElementById('ai-ollama-error');
+
+    function updateAiBadge() {
+      if (aiBackend === 'claude') {
+        aiBadge.textContent = 'AI: Claude';
+        aiBadge.className = 'ai-badge claude';
+      } else {
+        aiBadge.textContent = 'AI: Gemma 4';
+        aiBadge.className = 'ai-badge gemma';
+      }
+    }
+
+    function updateBackendOptions() {
+      document.getElementById('opt-gemma').classList.toggle('selected', aiBackend === 'gemma');
+      document.getElementById('opt-claude').classList.toggle('selected', aiBackend === 'claude');
+    }
+
+    // Load config on startup
+    window.api.getAiConfig().then(config => {
+      aiBackend = config.backend || 'claude';
+      updateAiBadge();
+    });
+
+    // Open settings
+    aiGearBtn.addEventListener('click', () => {
+      aiOverlay.classList.add('active');
+      aiOllamaError.style.display = 'none';
+      if (aiSettingsUnlocked) {
+        aiPinGate.style.display = 'none';
+        aiChooser.classList.add('active');
+        updateBackendOptions();
+      } else {
+        aiPinInput.value = '';
+        aiPinError.style.display = 'none';
+        aiPinGate.style.display = 'block';
+        aiChooser.classList.remove('active');
+        setTimeout(() => aiPinInput.focus(), 100);
+      }
+    });
+
+    // Close settings
+    document.getElementById('ai-settings-close').addEventListener('click', () => {
+      aiOverlay.classList.remove('active');
+    });
+    aiOverlay.addEventListener('click', (e) => {
+      if (e.target === aiOverlay) aiOverlay.classList.remove('active');
+    });
+
+    // PIN entry
+    aiPinInput.addEventListener('input', () => {
+      aiPinError.style.display = 'none';
+      if (aiPinInput.value.length === 4) {
+        if (aiPinInput.value === '1988') {
+          aiSettingsUnlocked = true;
+          aiPinGate.style.display = 'none';
+          aiChooser.classList.add('active');
+          updateBackendOptions();
+        } else {
+          aiPinError.style.display = 'block';
+          aiPinInput.value = '';
+        }
+      }
+    });
+
+    // Backend selection
+    async function selectBackend(backend) {
+      aiOllamaError.style.display = 'none';
+
+      if (backend === 'gemma') {
+        const health = await window.api.checkOllamaHealth();
+        if (!health.available) {
+          aiOllamaError.textContent = 'Gemma 4 requires Ollama to be running locally. Start Ollama and try again.';
+          aiOllamaError.style.display = 'block';
+          return;
+        }
+        if (!health.hasModel) {
+          aiOllamaError.textContent = 'Ollama is running but gemma4 model is not installed. Run: ollama pull gemma4:e4b';
+          aiOllamaError.style.display = 'block';
+          return;
+        }
+      }
+
+      aiBackend = backend;
+      updateAiBadge();
+      updateBackendOptions();
+      const saveResult = await window.api.setAiConfig({ backend });
+      if (!saveResult.success) {
+        console.warn('AI config save failed:', saveResult.error);
+      }
+    }
+
+    document.getElementById('opt-gemma').addEventListener('click', () => selectBackend('gemma'));
+    document.getElementById('opt-claude').addEventListener('click', () => selectBackend('claude'));
+
+    // ============================================
+    // Inspection Review Logic
+    // ============================================
+    let currentLink = '';
+    let previousLinks = [];
+    let currentPdfPath = null;   // file path for current inspection PDF
+    let previousPdfPaths = [];   // file paths for previous inspection PDFs
+    let results = null;
+    let currentContext = null;
+    let currentInspection = null;
+    let prevInspections = [];
+    let reviewDecisions = []; // Array of: null | 'tenant' | 'owner' | 'wear' | 'skip'
+    
+    const currentLinkInput = document.getElementById('current-link');
+    const previousLinksInput = document.getElementById('previous-links');
+    const currentStatus = document.getElementById('current-status');
+    const previousCount = document.getElementById('previous-count');
+    const loginBtn = document.getElementById('login-btn');
+    const startBtn = document.getElementById('start-btn');
+    const continueBtn = document.getElementById('continue-btn');
+    const cancelLoginBtn = document.getElementById('cancel-login-btn');
+    const loginPrompt = document.getElementById('login-prompt');
+    const inputSection = document.getElementById('input-section');
+    const progressSection = document.getElementById('progress-section');
+    const resultsSection = document.getElementById('results-section');
+    const progressBar = document.getElementById('progress-bar');
+    const progressStatus = document.getElementById('progress-status');
+    const progressItems = document.getElementById('progress-items');
+    const resultsContainer = document.getElementById('results-container');
+    const errorBox = document.getElementById('error-box');
+    const errorMessage = document.getElementById('error-message');
+    const retryBtn = document.getElementById('retry-btn');
+    const backBtn = document.getElementById('back-btn');
+    
+    function getAllLinks() {
+      const all = [];
+      if (currentLink) all.push(currentLink);
+      all.push(...previousLinks);
+      return all;
+    }
+    
+    function updateButtonStates() {
+      const hasCurrentLink = currentLink.startsWith('http');
+      const hasCurrentPdf = !!currentPdfPath;
+      const hasCurrentInput = hasCurrentLink || hasCurrentPdf;
+      const hasPreviousPdfs = previousPdfPaths.length > 0;
+
+      currentStatus.textContent = hasCurrentInput ? '✓ Ready' : 'Required';
+      currentStatus.style.background = hasCurrentInput ? 'var(--success-bg)' : '';
+      currentStatus.style.color = hasCurrentInput ? 'var(--success)' : '';
+
+      const prevCount = previousLinks.length + previousPdfPaths.length;
+      if (prevCount > 0) {
+        previousCount.textContent = prevCount + ' inspection' + (prevCount > 1 ? 's' : '');
+        previousCount.style.background = 'var(--success-bg)';
+        previousCount.style.color = 'var(--success)';
+      } else {
+        previousCount.textContent = 'Optional';
+        previousCount.style.background = 'var(--bg-tertiary)';
+        previousCount.style.color = 'var(--text-secondary)';
+      }
+
+      // PDF path: no login needed, can go straight to processing
+      loginBtn.disabled = hasCurrentPdf ? true : !hasCurrentLink;
+      startBtn.disabled = !hasCurrentInput;
+    }
+    
+    currentLinkInput.addEventListener('input', () => {
+      currentLink = currentLinkInput.value.trim();
+      updateButtonStates();
+    });
+    
+    previousLinksInput.addEventListener('input', () => {
+      previousLinks = previousLinksInput.value.split('\n').map(l => l.trim()).filter(l => l.startsWith('http'));
+      updateButtonStates();
+    });
+
+    document.getElementById('current-pdf').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        currentPdfPath = file.path;
+        document.getElementById('current-pdf-btn').classList.add('has-file');
+        document.getElementById('current-pdf-btn').textContent = 'PDF Selected';
+        document.getElementById('current-pdf-name').textContent = file.name;
+        currentLinkInput.value = '';
+        currentLink = '';
+      } else {
+        currentPdfPath = null;
+        document.getElementById('current-pdf-btn').classList.remove('has-file');
+        document.getElementById('current-pdf-btn').textContent = 'Upload Inspection PDF';
+        document.getElementById('current-pdf-name').textContent = '';
+      }
+      updateButtonStates();
+    });
+
+    document.getElementById('previous-pdf').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files);
+      if (files.length > 0) {
+        previousPdfPaths = files.map(f => f.path);
+        document.getElementById('previous-pdf-btn').classList.add('has-file');
+        document.getElementById('previous-pdf-btn').textContent = files.length + ' PDF(s) Selected';
+        document.getElementById('previous-pdf-name').textContent = files.map(f => f.name).join(', ');
+        previousLinksInput.value = '';
+        previousLinks = [];
+      } else {
+        previousPdfPaths = [];
+        document.getElementById('previous-pdf-btn').classList.remove('has-file');
+        document.getElementById('previous-pdf-btn').textContent = 'Upload Previous Inspection PDF(s)';
+        document.getElementById('previous-pdf-name').textContent = '';
+      }
+      updateButtonStates();
+    });
+    
+    loginBtn.addEventListener('click', async () => {
+      if (!currentLink) return;
+      loginBtn.disabled = true;
+      loginBtn.textContent = 'Opening browsers...';
+      try {
+        const result = await window.api.openLoginPages(getAllLinks());
+        if (result.success) {
+          loginPrompt.classList.add('active');
+          loginBtn.textContent = '✓ Browsers Opened';
+        } else {
+          alert('Failed: ' + result.error);
+          loginBtn.disabled = false;
+          loginBtn.textContent = 'Step 1: Login to Platforms';
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Step 1: Login to Platforms';
+      }
+    });
+    
+    continueBtn.addEventListener('click', () => {
+      loginPrompt.classList.remove('active');
+      startBtn.disabled = false;
+      startBtn.textContent = '✓ Process Inspection (Ready!)';
+      startBtn.classList.add('btn-success');
+    });
+    
+    cancelLoginBtn.addEventListener('click', () => {
+      loginPrompt.classList.remove('active');
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Step 1: Login to Platforms';
+    });
+    
+    startBtn.addEventListener('click', () => processInspections());
+    retryBtn.addEventListener('click', () => { errorBox.classList.remove('active'); processInspections(); });
+    backBtn.addEventListener('click', () => {
+      progressSection.classList.remove('active');
+      inputSection.style.display = 'block';
+      errorBox.classList.remove('active');
+      document.getElementById('progress-badge').textContent = 'In progress';
+      document.getElementById('progress-badge').className = 'badge badge-warning';
+    });
+    
+    async function processInspections() {
+      const hasCurrentUrl = currentLink.startsWith('http');
+      const hasCurrentPdf = !!currentPdfPath;
+      if (!hasCurrentUrl && !hasCurrentPdf) return;
+
+      // Combine all previous sources for counting
+      const prevUrlCount = previousLinks.length;
+      const prevPdfCount = previousPdfPaths.length;
+      const totalPrev = prevUrlCount + prevPdfCount;
+      const totalSteps = 1 + totalPrev + 1; // current + previous + analysis
+      const isComparison = totalPrev > 0;
+
+      currentContext = {
+        tenant: document.getElementById('tenant-name').value,
+        deposit: parseFloat(document.getElementById('deposit').value) || 0,
+        leaseStart: document.getElementById('lease-start').value,
+        leaseEnd: document.getElementById('lease-end').value
+      };
+
+      if (currentContext.leaseStart && currentContext.leaseEnd) {
+        const start = new Date(currentContext.leaseStart);
+        const end = new Date(currentContext.leaseEnd);
+        const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+        const years = Math.floor(months / 12);
+        const rem = months % 12;
+        currentContext.leaseDuration = years > 0 ? years + ' year' + (years > 1 ? 's' : '') + (rem > 0 ? ', ' + rem + ' month' + (rem > 1 ? 's' : '') : '') : months + ' month' + (months > 1 ? 's' : '');
+      }
+
+      inputSection.style.display = 'none';
+      progressSection.classList.add('active');
+      errorBox.classList.remove('active');
+      document.getElementById('progress-badge').textContent = 'In progress';
+      document.getElementById('progress-badge').className = 'badge badge-warning';
+      progressBar.style.width = '0%';
+
+      // Build progress items display
+      const currentLabel = hasCurrentPdf ? currentPdfPath.split(/[/\\]/).pop() : currentLink.substring(0, 50) + '...';
+      let html = '<div class="progress-item" data-index="current"><div class="progress-icon pending">○</div><div><div style="font-weight:500">Current Inspection</div><div style="font-size:13px;color:var(--text-secondary)">' + currentLabel + '</div></div></div>';
+
+      let prevIndex = 0;
+      previousLinks.forEach((link) => {
+        html += '<div class="progress-item" data-index="prev-' + prevIndex + '"><div class="progress-icon pending">○</div><div><div style="font-weight:500">Previous #' + (prevIndex + 1) + '</div><div style="font-size:13px;color:var(--text-secondary)">' + link.substring(0, 50) + '...</div></div></div>';
+        prevIndex++;
+      });
+      previousPdfPaths.forEach((p) => {
+        const name = p.split(/[/\\]/).pop();
+        html += '<div class="progress-item" data-index="prev-' + prevIndex + '"><div class="progress-icon pending">○</div><div><div style="font-weight:500">Previous #' + (prevIndex + 1) + ' (PDF)</div><div style="font-size:13px;color:var(--text-secondary)">' + name + '</div></div></div>';
+        prevIndex++;
+      });
+
+      html += '<div class="progress-item" data-index="analysis"><div class="progress-icon pending">○</div><div><div style="font-weight:500">AI Analysis</div><div style="font-size:13px;color:var(--text-secondary)">' + (isComparison ? 'Comparing...' : 'Analyzing...') + '</div></div></div>';
+      progressItems.innerHTML = html;
+
+      try {
+        // Only init browser if we have URL-based inputs
+        const needsBrowser = hasCurrentUrl || prevUrlCount > 0;
+        if (needsBrowser) {
+          progressStatus.textContent = 'Connecting to browser...';
+          await window.api.initBrowser();
+        }
+
+        // --- Fetch current inspection ---
+        updateProgressItem('current', 'loading');
+        progressBar.style.width = (1 / totalSteps * 100) + '%';
+
+        let currentResult;
+        if (hasCurrentPdf) {
+          progressStatus.textContent = 'Parsing current PDF...';
+          currentResult = await window.api.parsePdf(currentPdfPath);
+        } else {
+          progressStatus.textContent = 'Fetching current inspection...';
+          currentResult = await window.api.fetchInspection(currentLink);
+        }
+
+        if (!currentResult.success) {
+          updateProgressItem('current', 'error');
+          if (currentResult.error === 'LOGIN_REQUIRED' || currentResult.error === 'TIMEOUT') {
+            throw new Error('Login required. Use Step 1 first, then retry.');
+          }
+          throw new Error('Failed: ' + (currentResult.message || currentResult.error));
+        }
+        currentInspection = currentResult.data;
+        updateProgressItem('current', 'done');
+
+        // --- Fetch previous inspections (URLs then PDFs) ---
+        prevInspections = [];
+        let pi = 0;
+
+        for (let i = 0; i < previousLinks.length; i++) {
+          updateProgressItem('prev-' + pi, 'loading');
+          progressStatus.textContent = 'Fetching previous #' + (pi + 1) + '...';
+          progressBar.style.width = ((pi + 2) / totalSteps * 100) + '%';
+
+          const result = await window.api.fetchInspection(previousLinks[i]);
+          if (!result.success) {
+            updateProgressItem('prev-' + pi, 'error');
+            if (result.error === 'LOGIN_REQUIRED' || result.error === 'TIMEOUT') {
+              throw new Error('Login required. Use Step 1 first, then retry.');
+            }
+            throw new Error('Failed: ' + (result.message || result.error));
+          }
+          prevInspections.push(result.data);
+          updateProgressItem('prev-' + pi, 'done');
+          pi++;
+        }
+
+        for (let i = 0; i < previousPdfPaths.length; i++) {
+          updateProgressItem('prev-' + pi, 'loading');
+          progressStatus.textContent = 'Parsing previous PDF #' + (pi + 1) + '...';
+          progressBar.style.width = ((pi + 2) / totalSteps * 100) + '%';
+
+          const result = await window.api.parsePdf(previousPdfPaths[i]);
+          if (!result.success) {
+            updateProgressItem('prev-' + pi, 'error');
+            throw new Error('Failed to parse PDF: ' + result.error);
+          }
+          prevInspections.push(result.data);
+          updateProgressItem('prev-' + pi, 'done');
+          pi++;
+        }
+        
+        updateProgressItem('analysis', 'loading');
+        progressStatus.textContent = isComparison ? 'Comparing with AI...' : 'Analyzing with AI...';
+        progressBar.style.width = '90%';
+        
+        const analysisResult = await window.api.analyzeInspections({
+          newInspection: currentInspection,
+          previousInspections: prevInspections,
+          context: currentContext,
+          isComparison: isComparison
+        });
+        
+        if (!analysisResult.success) {
+          updateProgressItem('analysis', 'error');
+          throw new Error('Analysis failed: ' + analysisResult.error);
+        }
+        
+        updateProgressItem('analysis', 'done');
+        progressBar.style.width = '100%';
+        results = analysisResult.result;
+        showResults(results, currentContext);
+        
+      } catch (error) {
+        progressStatus.textContent = 'Error: ' + error.message;
+        document.getElementById('progress-badge').textContent = 'Failed';
+        document.getElementById('progress-badge').style.background = 'var(--danger-bg)';
+        document.getElementById('progress-badge').style.color = 'var(--danger)';
+        errorMessage.textContent = error.message;
+        errorBox.classList.add('active');
+      }
+    }
+    
+    function updateProgressItem(index, status) {
+      const item = document.querySelector('.progress-item[data-index="' + index + '"]');
+      if (!item) return;
+      const icon = item.querySelector('.progress-icon');
+      icon.className = 'progress-icon ' + status;
+      if (status === 'loading') icon.innerHTML = '<div class="spinner"></div>';
+      else if (status === 'done') icon.innerHTML = '✓';
+      else if (status === 'error') icon.innerHTML = '✗';
+    }
+    
+    function showResults(results, context) {
+      progressSection.classList.remove('active');
+      resultsSection.classList.add('active');
+
+      const issues = results.issues || [];
+      reviewDecisions = new Array(issues.length).fill(null);
+
+      resultsContainer.textContent = '';
+
+      // Header: overall condition + summary
+      const header = document.createElement('div');
+      header.style.marginBottom = '20px';
+      const condSpan = document.createElement('span');
+      condSpan.style.cssText = 'font-size:18px;font-weight:600';
+      condSpan.textContent = 'Overall: ' + (results.overall_condition || 'N/A').toUpperCase();
+      header.appendChild(condSpan);
+      const summaryP = document.createElement('p');
+      summaryP.style.cssText = 'color:var(--text-secondary);margin-top:8px';
+      summaryP.textContent = results.summary || '';
+      header.appendChild(summaryP);
+      resultsContainer.appendChild(header);
+
+      // Issues title
+      const issuesTitle = document.createElement('h3');
+      issuesTitle.style.cssText = 'font-size:16px;margin-bottom:4px';
+      issuesTitle.textContent = 'Issues Found (' + issues.length + ')';
+      resultsContainer.appendChild(issuesTitle);
+      const issuesHelp = document.createElement('p');
+      issuesHelp.style.cssText = 'font-size:13px;color:var(--text-tertiary);margin-bottom:12px';
+      issuesHelp.textContent = 'Review each issue and assign responsibility using the buttons.';
+      resultsContainer.appendChild(issuesHelp);
+
+      // Issues list
+      const issuesList = document.createElement('ul');
+      issuesList.className = 'issue-list';
+
+      issues.forEach((issue, idx) => {
+        const li = document.createElement('li');
+        li.className = 'issue-item';
+        li.id = 'issue-' + idx;
+
+        // Top row: number + content + severity badge
+        const topRow = document.createElement('div');
+        topRow.className = 'issue-top';
+
+        const num = document.createElement('div');
+        num.className = 'issue-number';
+        num.textContent = idx + 1;
+        topRow.appendChild(num);
+
+        const content = document.createElement('div');
+        content.className = 'issue-content';
+
+        const loc = document.createElement('div');
+        loc.className = 'issue-location';
+        loc.textContent = issue.room + (issue.area ? ' — ' + issue.area : '');
+        content.appendChild(loc);
+
+        const desc = document.createElement('div');
+        desc.className = 'issue-description';
+        desc.textContent = issue.description;
+        content.appendChild(desc);
+
+        // Meta: section + photo reference
+        const metaParts = [];
+        if (issue.section) metaParts.push(issue.section);
+        if (issue.photo_reference) metaParts.push(issue.photo_reference);
+        if (metaParts.length > 0) {
+          const meta = document.createElement('div');
+          meta.className = 'issue-meta';
+          metaParts.forEach(part => {
+            const span = document.createElement('span');
+            span.textContent = part;
+            meta.appendChild(span);
+          });
+          content.appendChild(meta);
+        }
+
+        // Comparison note (if move-in data available)
+        if (issue.in_move_in) {
+          const comp = document.createElement('div');
+          if (issue.in_move_in === 'no') {
+            comp.className = 'issue-comparison new-issue';
+            comp.textContent = 'NEW — Not in move-in inspection';
+          } else if (issue.in_move_in === 'yes') {
+            comp.className = 'issue-comparison existing';
+            comp.textContent = 'Also in move-in' + (issue.move_in_note ? ': ' + issue.move_in_note : '');
+          } else if (issue.in_move_in === 'unclear') {
+            comp.className = 'issue-comparison unclear';
+            comp.textContent = 'Unclear — could not confirm in move-in photos';
+          }
+          if (comp.textContent) content.appendChild(comp);
+        }
+
+        // Decision buttons
+        const btns = document.createElement('div');
+        btns.className = 'decision-buttons';
+
+        function makeBtn(label, decision, selectedClass) {
+          const btn = document.createElement('button');
+          btn.className = 'decision-btn';
+          btn.textContent = label;
+          btn.dataset.decision = decision;
+          btn.addEventListener('click', () => {
+            // Toggle: if already selected, deselect
+            if (reviewDecisions[idx] === decision) {
+              reviewDecisions[idx] = null;
+            } else {
+              reviewDecisions[idx] = decision;
+            }
+            // Update button states for this issue
+            btns.querySelectorAll('.decision-btn').forEach(b => {
+              b.className = 'decision-btn';
+            });
+            if (reviewDecisions[idx]) {
+              btn.classList.add(selectedClass);
+            }
+            updateReviewSummary();
+          });
+          return btn;
+        }
+
+        btns.appendChild(makeBtn('Tenant', 'tenant', 'selected-tenant'));
+        btns.appendChild(makeBtn('Owner', 'owner', 'selected-owner'));
+        btns.appendChild(makeBtn('Normal Wear', 'wear', 'selected-wear'));
+        btns.appendChild(makeBtn('Skip', 'skip', 'selected-skip'));
+        content.appendChild(btns);
+
+        topRow.appendChild(content);
+
+        // Severity badge
+        if (issue.severity) {
+          const sev = document.createElement('span');
+          sev.className = 'severity-badge ' + issue.severity;
+          sev.textContent = issue.severity;
+          topRow.appendChild(sev);
+        }
+
+        li.appendChild(topRow);
+        issuesList.appendChild(li);
+      });
+
+      resultsContainer.appendChild(issuesList);
+
+      // Review summary (sticky at bottom)
+      const summaryDiv = document.createElement('div');
+      summaryDiv.className = 'review-summary';
+      summaryDiv.id = 'review-summary';
+      resultsContainer.appendChild(summaryDiv);
+      updateReviewSummary();
+    }
+
+    function updateReviewSummary() {
+      const summaryDiv = document.getElementById('review-summary');
+      if (!summaryDiv) return;
+
+      const total = reviewDecisions.length;
+      const counts = { tenant: 0, owner: 0, wear: 0, skip: 0, unreviewed: 0 };
+      reviewDecisions.forEach(d => {
+        if (d) counts[d]++;
+        else counts.unreviewed++;
+      });
+
+      summaryDiv.textContent = '';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Review Progress';
+      summaryDiv.appendChild(title);
+
+      const countsDiv = document.createElement('div');
+      countsDiv.className = 'summary-counts';
+
+      function addCount(label, count, dotClass) {
+        const item = document.createElement('div');
+        item.className = 'summary-count';
+        const dot = document.createElement('span');
+        dot.className = 'summary-dot ' + dotClass;
+        item.appendChild(dot);
+        const text = document.createElement('span');
+        text.textContent = count + ' ' + label;
+        item.appendChild(text);
+        countsDiv.appendChild(item);
+      }
+
+      addCount('Tenant', counts.tenant, 'tenant');
+      addCount('Owner', counts.owner, 'owner');
+      addCount('Normal Wear', counts.wear, 'wear');
+      addCount('Skipped', counts.skip, 'skip');
+      addCount('Unreviewed', counts.unreviewed, 'unreviewed');
+      summaryDiv.appendChild(countsDiv);
+
+      const progress = document.createElement('div');
+      progress.className = 'summary-progress';
+      const reviewed = total - counts.unreviewed;
+      progress.textContent = reviewed + ' of ' + total + ' issues reviewed';
+      summaryDiv.appendChild(progress);
+    }
+    
+    // Helper: get issues filtered by reviewer decision
+    function getReviewedIssues(decision) {
+      return (results.issues || []).filter((_, idx) => reviewDecisions[idx] === decision);
+    }
+
+    function checkReviewComplete() {
+      const unreviewed = reviewDecisions.filter(d => d === null).length;
+      if (unreviewed > 0) {
+        return confirm(unreviewed + ' issue(s) still unreviewed. Continue anyway?');
+      }
+      return true;
+    }
+
+    document.getElementById('copy-owner-email').addEventListener('click', () => {
+      if (!checkReviewComplete()) return;
+      const tenantItems = getReviewedIssues('tenant');
+      const ownerItems = getReviewedIssues('owner');
+      let email = 'Subject: Inspection Summary\n\nHi,\n\nMove-out inspection complete. Overall: ' + (results.overall_condition || 'fair') + ' condition.\n\n' + (results.summary || '');
+      email += '\n\nTenant-Responsible Items (' + tenantItems.length + '):\n';
+      email += tenantItems.length > 0 ? tenantItems.map(i => '- ' + i.room + (i.area ? ' - ' + i.area : '') + ': ' + i.description).join('\n') : '- None';
+      email += '\n\nOwner/Maintenance Items (' + ownerItems.length + '):\n';
+      email += ownerItems.length > 0 ? ownerItems.map(i => '- ' + i.room + (i.area ? ' - ' + i.area : '') + ': ' + i.description).join('\n') : '- None';
+      email += '\n\nBest regards';
+      navigator.clipboard.writeText(email);
+      alert('Owner email copied!');
+    });
+
+    document.getElementById('copy-tenant-email').addEventListener('click', () => {
+      if (!checkReviewComplete()) return;
+      const tenantItems = getReviewedIssues('tenant');
+      let email = 'Subject: Move-Out Inspection Results\n\nDear Tenant,\n\nYour move-out inspection has been completed. Overall condition: ' + (results.overall_condition || 'N/A') + '.\n\n' + (results.summary || '');
+      if (tenantItems.length > 0) {
+        email += '\n\nItems identified as tenant responsibility:\n';
+        email += tenantItems.map((i, n) => (n + 1) + '. ' + i.room + (i.area ? ' - ' + i.area : '') + ': ' + i.description).join('\n');
+      } else {
+        email += '\n\nNo items were identified as tenant responsibility.';
+      }
+      email += '\n\nPlease contact us with any questions.\n\nBest regards';
+      navigator.clipboard.writeText(email);
+      alert('Tenant email copied!');
+    });
+
+    document.getElementById('export-json').addEventListener('click', () => {
+      const exportData = {
+        ai_findings: results,
+        reviewer_decisions: (results.issues || []).map((issue, idx) => ({
+          issue_number: idx + 1,
+          room: issue.room,
+          area: issue.area,
+          description: issue.description,
+          decision: reviewDecisions[idx] || 'unreviewed',
+        })),
+        summary: {
+          tenant: getReviewedIssues('tenant').length,
+          owner: getReviewedIssues('owner').length,
+          normal_wear: getReviewedIssues('wear').length,
+          skipped: getReviewedIssues('skip').length,
+          unreviewed: reviewDecisions.filter(d => d === null).length,
+        },
+      };
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'inspection-' + new Date().toISOString().split('T')[0] + '.json';
+      a.click();
+    });
+
+    document.getElementById('save-to-crm').addEventListener('click', async () => {
+      const btn = document.getElementById('save-to-crm');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      try {
+        const res = await window.api.sendToCrm({
+          currentInspection: currentInspection,
+          previousInspections: prevInspections || [],
+          context: currentContext,
+          result: results,
+          reviewerDecisions: (results.issues || []).map((issue, idx) => ({
+            issue_number: idx + 1,
+            room: issue.room,
+            area: issue.area,
+            decision: reviewDecisions[idx] || 'unreviewed',
+          })),
+        });
+        if (res.success) {
+          btn.textContent = 'Saved to CRM';
+        } else {
+          alert('Failed to save: ' + (res.error || 'Unknown error'));
+          btn.disabled = false;
+          btn.textContent = 'Save to CRM';
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Save to CRM';
+      }
+    });
+
+    document.getElementById('start-new').addEventListener('click', () => {
+      resultsSection.classList.remove('active');
+      inputSection.style.display = 'block';
+      currentLinkInput.value = '';
+      previousLinksInput.value = '';
+      currentLink = '';
+      previousLinks = [];
+      reviewDecisions = [];
+
+      // Reset PDF state
+      currentPdfPath = null;
+      previousPdfPaths = [];
+      const currentPdfInput = document.getElementById('current-pdf');
+      const previousPdfInput = document.getElementById('previous-pdf');
+      if (currentPdfInput) currentPdfInput.value = '';
+      if (previousPdfInput) previousPdfInput.value = '';
+      const currentPdfBtn = document.getElementById('current-pdf-btn');
+      if (currentPdfBtn) {
+        currentPdfBtn.classList.remove('has-file');
+        currentPdfBtn.textContent = 'Upload Inspection PDF';
+      }
+      const currentPdfName = document.getElementById('current-pdf-name');
+      if (currentPdfName) currentPdfName.textContent = '';
+      const previousPdfBtn = document.getElementById('previous-pdf-btn');
+      if (previousPdfBtn) {
+        previousPdfBtn.classList.remove('has-file');
+        previousPdfBtn.textContent = 'Upload Previous Inspection PDF(s)';
+      }
+      const previousPdfName = document.getElementById('previous-pdf-name');
+      if (previousPdfName) previousPdfName.textContent = '';
+
+      updateButtonStates();
+      loginBtn.textContent = 'Step 1: Login to Platforms';
+      startBtn.textContent = 'Step 2: Process Inspection';
+      startBtn.classList.remove('btn-success');
+    });
+  </script>
+</body>
+</html>

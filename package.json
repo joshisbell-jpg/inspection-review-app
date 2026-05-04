@@ -1,0 +1,53 @@
+{
+  "name": "inspection-review-app",
+  "version": "1.0.0",
+  "description": "AI-powered property inspection review tool",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "dotenv": "^17.3.1",
+    "pdf-parse": "^1.1.1",
+    "playwright": "^1.42.0"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.isbellrentals.inspection-review",
+    "productName": "Inspection Review",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!**/.env",
+      "!**/node_modules/playwright/node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "playwright-browsers",
+        "to": "playwright-browsers",
+        "filter": ["**/*"]
+      },
+      {
+        "from": ".env.example",
+        "to": ".env.example"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
