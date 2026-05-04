@@ -694,16 +694,7 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
       platform = 'appfolio';
     }
 
-    // Extract property address from first few lines
-    const lines = text.split('\n').filter(l => l.trim());
-    let address = '';
-    for (const line of lines.slice(0, 20)) {
-      // Look for common address patterns (number + street)
-      if (/^\d+\s+\w/.test(line.trim()) && line.trim().length < 100) {
-        address = line.trim();
-        break;
-      }
-    }
+    const address = extractPropertyAddress(text, platform);
 
     return {
       success: true,
@@ -728,6 +719,58 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
 // ============================================
 // Helper Functions
 // ============================================
+
+/**
+ * Extract property address from PDF text using format-aware strategies.
+ *
+ * Returns the property address string. Falls back to legacy naive regex if
+ * format-specific extraction fails — Mission 2.5c will add a human-editable
+ * field in the renderer as the final safety net.
+ */
+function extractPropertyAddress(text, platform) {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+  const head = lines.slice(0, 30);
+
+  // Strategy 1: AppFolio "Property:..." line
+  if (platform === 'appfolio') {
+    for (const line of head) {
+      const m = line.match(/^Property\s*:\s*(.+)$/i);
+      if (m && m[1].trim().length > 0 && m[1].trim().length < 200) {
+        const result = m[1].trim();
+        console.log(`[parse-pdf] address via AppFolio Property: prefix → ${result}`);
+        return result;
+      }
+    }
+  }
+
+  // Strategy 2: zInspector "PropertyTenant(s)Date..." header table
+  if (platform === 'zinspector') {
+    for (let i = 0; i < head.length - 1; i++) {
+      if (/^Property\s*Tenant\(s\)\s*Date\s*Agent/i.test(head[i])) {
+        const dataLine = head[i + 1];
+        const dateMatch = dataLine.match(/(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}\/\d{4})/);
+        if (dateMatch && dateMatch.index > 0) {
+          const result = dataLine.slice(0, dateMatch.index).trim();
+          if (result.length > 0 && result.length < 200) {
+            console.log(`[parse-pdf] address via zInspector property table → ${result}`);
+            return result;
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback: legacy naive regex (better wrong than empty)
+  for (const line of lines.slice(0, 20)) {
+    if (/^\d+\s+\w/.test(line) && line.length < 100) {
+      console.warn(`[parse-pdf] address via legacy fallback regex (may be wrong) → ${line}`);
+      return line;
+    }
+  }
+
+  console.warn('[parse-pdf] no address extracted');
+  return '';
+}
 
 function detectPlatform(url) {
   if (url.includes('appfolio.com')) return 'appfolio';
