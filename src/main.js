@@ -694,7 +694,7 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
       platform = 'appfolio';
     }
 
-    const address = extractPropertyAddress(text, platform);
+    const { address, source: addressSource } = extractPropertyAddress(text, platform);
 
     return {
       success: true,
@@ -705,6 +705,7 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
         photos: [],           // No photos for PDF
         tableData: [],        // No DOM table data for PDF
         property: { address },
+        addressSource,
         textContent: text,
         pageCount: data.numpages || 0,
         extractedAt: new Date().toISOString(),
@@ -723,9 +724,10 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
 /**
  * Extract property address from PDF text using format-aware strategies.
  *
- * Returns the property address string. Falls back to legacy naive regex if
- * format-specific extraction fails — Mission 2.5c will add a human-editable
- * field in the renderer as the final safety net.
+ * Returns { address: string, source: 'appfolio' | 'zinspector' | 'fallback' | 'empty' }.
+ * The source identifies which strategy matched, used by the renderer to badge
+ * extraction confidence. Falls back to legacy naive regex if format-specific
+ * extraction fails — Mission 2.5c added a human-editable field as the safety net.
  */
 function extractPropertyAddress(text, platform) {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l);
@@ -738,7 +740,7 @@ function extractPropertyAddress(text, platform) {
       if (m && m[1].trim().length > 0 && m[1].trim().length < 200) {
         const result = m[1].trim();
         console.log(`[parse-pdf] address via AppFolio Property: prefix → ${result}`);
-        return result;
+        return { address: result, source: 'appfolio' };
       }
     }
   }
@@ -753,7 +755,7 @@ function extractPropertyAddress(text, platform) {
           const result = dataLine.slice(0, dateMatch.index).trim();
           if (result.length > 0 && result.length < 200) {
             console.log(`[parse-pdf] address via zInspector property table → ${result}`);
-            return result;
+            return { address: result, source: 'zinspector' };
           }
         }
       }
@@ -764,12 +766,12 @@ function extractPropertyAddress(text, platform) {
   for (const line of lines.slice(0, 20)) {
     if (/^\d+\s+\w/.test(line) && line.length < 100) {
       console.warn(`[parse-pdf] address via legacy fallback regex (may be wrong) → ${line}`);
-      return line;
+      return { address: line, source: 'fallback' };
     }
   }
 
   console.warn('[parse-pdf] no address extracted');
-  return '';
+  return { address: '', source: 'empty' };
 }
 
 function detectPlatform(url) {

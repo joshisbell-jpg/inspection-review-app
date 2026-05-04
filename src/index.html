@@ -151,7 +151,58 @@
       color: var(--text-secondary);
       margin-bottom: 6px;
     }
-    
+
+    .address-card label {
+      display: block;
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+    }
+    .address-card label .required-marker {
+      color: var(--danger);
+      margin-left: 4px;
+    }
+    .address-card #property-address {
+      width: 100%;
+      padding: 12px;
+      font-size: 15px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    .address-card #property-address.invalid {
+      border-color: var(--danger);
+      background: var(--danger-bg);
+    }
+    .address-card #property-address:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    .address-card #address-source-badge {
+      display: inline-block;
+      margin-bottom: 8px;
+    }
+    .address-card #address-source-badge:empty {
+      display: none;
+    }
+    .address-card #address-error {
+      font-size: 13px;
+      color: var(--danger);
+      margin-top: 6px;
+      display: none;
+    }
+    .address-card #address-error.visible {
+      display: block;
+    }
+    .address-card .address-help {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+
     .btn {
       display: inline-flex;
       align-items: center;
@@ -502,7 +553,15 @@
   <div class="container">
     <h1>Inspection Review</h1>
     <p class="subtitle">Paste inspection links to analyze and generate reports</p>
-    
+
+    <div class="card address-card">
+      <label for="property-address">Property address<span class="required-marker">*</span></label>
+      <span id="address-source-badge" class="badge"></span>
+      <input type="text" id="property-address" autocomplete="off" placeholder="e.g. 108 Wickiup Trail, Harker Heights, TX 76548">
+      <div id="address-error">Please enter the property address before saving</div>
+      <p class="address-help">Auto-detected from the inspection PDF after Step 2. Edit if needed before saving to CRM.</p>
+    </div>
+
     <div class="card" id="input-section">
       <!-- Current Inspection -->
       <div class="input-section">
@@ -730,6 +789,21 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     let results = null;
     let currentContext = null;
     let currentInspection = null;
+
+    let addressIsDirty = false;
+    const addressInput = document.getElementById('property-address');
+    const addressBadge = document.getElementById('address-source-badge');
+    const addressError = document.getElementById('address-error');
+
+    addressInput.addEventListener('input', () => {
+      addressIsDirty = true;
+      addressBadge.textContent = '';
+      addressBadge.className = 'badge';
+      if (addressInput.value.trim()) {
+        addressInput.classList.remove('invalid');
+        addressError.classList.remove('visible');
+      }
+    });
     let prevInspections = [];
     let reviewDecisions = []; // Array of: null | 'tenant' | 'owner' | 'wear' | 'skip'
     
@@ -959,6 +1033,25 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
           throw new Error('Failed: ' + (currentResult.message || currentResult.error));
         }
         currentInspection = currentResult.data;
+
+        if (!addressIsDirty) {
+          const auto = currentInspection.property?.address || '';
+          addressInput.value = auto;
+          addressInput.classList.remove('invalid');
+          addressError.classList.remove('visible');
+          const src = currentInspection.addressSource;
+          if (src === 'appfolio' || src === 'zinspector') {
+            addressBadge.textContent = 'Auto-detected from PDF';
+            addressBadge.className = 'badge badge-info';
+          } else if (src === 'fallback') {
+            addressBadge.textContent = 'Auto-detect uncertain — please verify';
+            addressBadge.className = 'badge badge-warning';
+          } else {
+            addressBadge.textContent = '';
+            addressBadge.className = 'badge';
+          }
+        }
+
         updateProgressItem('current', 'done');
 
         // --- Fetch previous inspections (URLs then PDFs) ---
@@ -1306,13 +1399,23 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
 
     document.getElementById('save-to-crm').addEventListener('click', async () => {
       const btn = document.getElementById('save-to-crm');
+      const addressValue = addressInput.value.trim();
+
+      if (!addressValue) {
+        addressInput.classList.add('invalid');
+        addressError.classList.add('visible');
+        if (!confirm('The property address is empty. Save without it?')) {
+          return;
+        }
+      }
+
       btn.disabled = true;
       btn.textContent = 'Saving...';
       try {
         const res = await window.api.sendToCrm({
           currentInspection: currentInspection,
           previousInspections: prevInspections || [],
-          context: currentContext,
+          context: { ...(currentContext || {}), address: addressValue },
           result: results,
           reviewerDecisions: (results.issues || []).map((issue, idx) => ({
             issue_number: idx + 1,
@@ -1365,6 +1468,13 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       }
       const previousPdfName = document.getElementById('previous-pdf-name');
       if (previousPdfName) previousPdfName.textContent = '';
+
+      addressInput.value = '';
+      addressIsDirty = false;
+      addressBadge.textContent = '';
+      addressBadge.className = 'badge';
+      addressInput.classList.remove('invalid');
+      addressError.classList.remove('visible');
 
       updateButtonStates();
       loginBtn.textContent = 'Step 1: Login to Platforms';
