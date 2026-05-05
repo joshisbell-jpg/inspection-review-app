@@ -426,130 +426,13 @@
       font-size: 13px; color: var(--text-secondary); margin-top: 6px;
     }
 
-    /* AI backend badge + settings */
-    .ai-header-row {
-      display: flex; align-items: center; gap: 8px;
-      position: absolute; top: 8px; right: 16px;
-      -webkit-app-region: no-drag;
-    }
-    .ai-badge {
-      font-size: 11px; padding: 3px 10px; border-radius: 12px; font-weight: 600;
-      letter-spacing: 0.3px;
-    }
-    .ai-badge.gemma { background: #dbeafe; color: #1e40af; }
-    .ai-badge.claude { background: #ede9fe; color: #6d28d9; }
-    .ai-gear-btn {
-      background: none; border: none; cursor: pointer; padding: 4px;
-      color: var(--text-tertiary); font-size: 16px; line-height: 1;
-      border-radius: 4px; transition: color 0.15s;
-    }
-    .ai-gear-btn:hover { color: var(--text-primary); }
-
-    .ai-settings-overlay {
-      display: none; position: fixed; inset: 0;
-      background: rgba(0,0,0,0.4); z-index: 1000;
-      align-items: center; justify-content: center;
-    }
-    .ai-settings-overlay.active { display: flex; }
-    .ai-settings-modal {
-      background: var(--bg-primary); border: 1px solid var(--border);
-      border-radius: var(--radius-lg); padding: 24px; width: 340px;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-    }
-    .ai-settings-modal h3 { font-size: 16px; margin-bottom: 16px; }
-    .ai-pin-input {
-      width: 100%; padding: 10px 12px; font-size: 20px; text-align: center;
-      letter-spacing: 8px; border: 1px solid var(--border); border-radius: var(--radius);
-      background: var(--bg-secondary); color: var(--text-primary);
-    }
-    .ai-pin-input:focus { outline: none; border-color: var(--accent); }
-    .ai-pin-error {
-      color: var(--danger); font-size: 13px; margin-top: 6px; display: none;
-    }
-    .ai-backend-chooser { display: none; }
-    .ai-backend-chooser.active { display: block; }
-    .ai-backend-option {
-      display: flex; align-items: center; gap: 12px;
-      padding: 12px; border: 2px solid var(--border); border-radius: var(--radius);
-      cursor: pointer; margin-bottom: 8px; transition: all 0.15s;
-    }
-    .ai-backend-option:hover { border-color: var(--accent); }
-    .ai-backend-option.selected { border-color: var(--accent); background: #eff6ff; }
-    @media (prefers-color-scheme: dark) {
-      .ai-backend-option.selected { background: #1e3a5f; }
-    }
-    .ai-backend-option .radio {
-      width: 18px; height: 18px; border-radius: 50%;
-      border: 2px solid var(--border); display: flex;
-      align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .ai-backend-option.selected .radio {
-      border-color: var(--accent);
-    }
-    .ai-backend-option.selected .radio::after {
-      content: ''; width: 10px; height: 10px; border-radius: 50%;
-      background: var(--accent);
-    }
-    .ai-backend-label { font-weight: 500; font-size: 14px; }
-    .ai-backend-desc { font-size: 12px; color: var(--text-secondary); }
-    .ai-ollama-error {
-      color: var(--danger); font-size: 13px; padding: 8px 12px;
-      background: var(--danger-bg); border-radius: var(--radius);
-      margin-top: 8px; display: none;
-    }
-    .ai-settings-close {
-      margin-top: 16px; width: 100%; padding: 8px;
-      background: var(--bg-tertiary); border: 1px solid var(--border);
-      border-radius: var(--radius); cursor: pointer; font-size: 14px;
-      color: var(--text-primary);
-    }
-    .ai-settings-close:hover { background: var(--border); }
   </style>
 </head>
 <body>
-  <div class="titlebar" style="position: relative;">
+  <div class="titlebar">
     Inspection Review Tool
-    <div class="ai-header-row">
-      <span class="ai-badge gemma" id="ai-badge">AI: Gemma 4</span>
-      <button class="ai-gear-btn" id="ai-gear-btn" title="AI Settings">&#9881;</button>
-    </div>
   </div>
 
-  <!-- AI Settings Modal -->
-  <div class="ai-settings-overlay" id="ai-settings-overlay">
-    <div class="ai-settings-modal">
-      <h3>AI Settings</h3>
-
-      <!-- PIN gate -->
-      <div id="ai-pin-gate">
-        <label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:8px;">Enter PIN to access settings</label>
-        <input type="password" class="ai-pin-input" id="ai-pin-input" maxlength="4" placeholder="----" inputmode="numeric">
-        <div class="ai-pin-error" id="ai-pin-error">Incorrect PIN</div>
-      </div>
-
-      <!-- Backend chooser (hidden until PIN correct) -->
-      <div class="ai-backend-chooser" id="ai-backend-chooser">
-        <div class="ai-backend-option" data-backend="gemma" id="opt-gemma">
-          <div class="radio"></div>
-          <div>
-            <div class="ai-backend-label">Gemma 4 (Local)</div>
-            <div class="ai-backend-desc">Runs via Ollama — free, no API costs</div>
-          </div>
-        </div>
-        <div class="ai-backend-option" data-backend="claude" id="opt-claude">
-          <div class="radio"></div>
-          <div>
-            <div class="ai-backend-label">Claude API</div>
-            <div class="ai-backend-desc">Anthropic cloud — higher accuracy, API costs</div>
-          </div>
-        </div>
-        <div class="ai-ollama-error" id="ai-ollama-error">Gemma 4 requires Ollama to be running locally. Start Ollama and try again.</div>
-      </div>
-
-      <button class="ai-settings-close" id="ai-settings-close">Close</button>
-    </div>
-  </div>
-  
   <div class="container">
     <h1>Inspection Review</h1>
     <p class="subtitle">Paste inspection links to analyze and generate reports</p>
@@ -673,113 +556,6 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
   
   <script>
     // ============================================
-    // AI Backend Settings
-    // ============================================
-    let aiBackend = 'gemma'; // will be loaded from config
-    let aiSettingsUnlocked = false;
-
-    const aiBadge = document.getElementById('ai-badge');
-    const aiGearBtn = document.getElementById('ai-gear-btn');
-    const aiOverlay = document.getElementById('ai-settings-overlay');
-    const aiPinGate = document.getElementById('ai-pin-gate');
-    const aiPinInput = document.getElementById('ai-pin-input');
-    const aiPinError = document.getElementById('ai-pin-error');
-    const aiChooser = document.getElementById('ai-backend-chooser');
-    const aiOllamaError = document.getElementById('ai-ollama-error');
-
-    function updateAiBadge() {
-      if (aiBackend === 'claude') {
-        aiBadge.textContent = 'AI: Claude';
-        aiBadge.className = 'ai-badge claude';
-      } else {
-        aiBadge.textContent = 'AI: Gemma 4';
-        aiBadge.className = 'ai-badge gemma';
-      }
-    }
-
-    function updateBackendOptions() {
-      document.getElementById('opt-gemma').classList.toggle('selected', aiBackend === 'gemma');
-      document.getElementById('opt-claude').classList.toggle('selected', aiBackend === 'claude');
-    }
-
-    // Load config on startup
-    window.api.getAiConfig().then(config => {
-      aiBackend = config.backend || 'claude';
-      updateAiBadge();
-    });
-
-    // Open settings
-    aiGearBtn.addEventListener('click', () => {
-      aiOverlay.classList.add('active');
-      aiOllamaError.style.display = 'none';
-      if (aiSettingsUnlocked) {
-        aiPinGate.style.display = 'none';
-        aiChooser.classList.add('active');
-        updateBackendOptions();
-      } else {
-        aiPinInput.value = '';
-        aiPinError.style.display = 'none';
-        aiPinGate.style.display = 'block';
-        aiChooser.classList.remove('active');
-        setTimeout(() => aiPinInput.focus(), 100);
-      }
-    });
-
-    // Close settings
-    document.getElementById('ai-settings-close').addEventListener('click', () => {
-      aiOverlay.classList.remove('active');
-    });
-    aiOverlay.addEventListener('click', (e) => {
-      if (e.target === aiOverlay) aiOverlay.classList.remove('active');
-    });
-
-    // PIN entry
-    aiPinInput.addEventListener('input', () => {
-      aiPinError.style.display = 'none';
-      if (aiPinInput.value.length === 4) {
-        if (aiPinInput.value === '1988') {
-          aiSettingsUnlocked = true;
-          aiPinGate.style.display = 'none';
-          aiChooser.classList.add('active');
-          updateBackendOptions();
-        } else {
-          aiPinError.style.display = 'block';
-          aiPinInput.value = '';
-        }
-      }
-    });
-
-    // Backend selection
-    async function selectBackend(backend) {
-      aiOllamaError.style.display = 'none';
-
-      if (backend === 'gemma') {
-        const health = await window.api.checkOllamaHealth();
-        if (!health.available) {
-          aiOllamaError.textContent = 'Gemma 4 requires Ollama to be running locally. Start Ollama and try again.';
-          aiOllamaError.style.display = 'block';
-          return;
-        }
-        if (!health.hasModel) {
-          aiOllamaError.textContent = 'Ollama is running but gemma4 model is not installed. Run: ollama pull gemma4:e4b';
-          aiOllamaError.style.display = 'block';
-          return;
-        }
-      }
-
-      aiBackend = backend;
-      updateAiBadge();
-      updateBackendOptions();
-      const saveResult = await window.api.setAiConfig({ backend });
-      if (!saveResult.success) {
-        console.warn('AI config save failed:', saveResult.error);
-      }
-    }
-
-    document.getElementById('opt-gemma').addEventListener('click', () => selectBackend('gemma'));
-    document.getElementById('opt-claude').addEventListener('click', () => selectBackend('claude'));
-
-    // ============================================
     // Inspection Review Logic
     // ============================================
     let currentLink = '';
@@ -806,6 +582,11 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     });
     let prevInspections = [];
     let reviewDecisions = []; // Array of: null | 'tenant' | 'owner' | 'wear' | 'skip'
+    // V2: results.issues IS the display array.
+    // V3: results.issues is the V3IssuesBlob (object); the display array lives at
+    //     results._displayShape.issues with each row carrying `_v3Id` for back-mapping.
+    // displayIssues unifies the two so the renderer/save-to-crm logic can stay format-agnostic.
+    let displayIssues = [];
     
     const currentLinkInput = document.getElementById('current-link');
     const previousLinksInput = document.getElementById('previous-links');
@@ -1136,7 +917,12 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       progressSection.classList.remove('active');
       resultsSection.classList.add('active');
 
-      const issues = results.issues || [];
+      // Resolve the display array based on emission format. V3 carries it on _displayShape;
+      // V2 keeps it at the top level. Both feed the same renderer.
+      displayIssues = results.format === 'v3'
+        ? ((results._displayShape && results._displayShape.issues) || [])
+        : (results.issues || []);
+      const issues = displayIssues;
       reviewDecisions = new Array(issues.length).fill(null);
 
       resultsContainer.textContent = '';
@@ -1332,7 +1118,7 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     
     // Helper: get issues filtered by reviewer decision
     function getReviewedIssues(decision) {
-      return (results.issues || []).filter((_, idx) => reviewDecisions[idx] === decision);
+      return displayIssues.filter((_, idx) => reviewDecisions[idx] === decision);
     }
 
     function checkReviewComplete() {
@@ -1375,7 +1161,7 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     document.getElementById('export-json').addEventListener('click', () => {
       const exportData = {
         ai_findings: results,
-        reviewer_decisions: (results.issues || []).map((issue, idx) => ({
+        reviewer_decisions: displayIssues.map((issue, idx) => ({
           issue_number: idx + 1,
           room: issue.room,
           area: issue.area,
@@ -1417,7 +1203,7 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
           previousInspections: prevInspections || [],
           context: { ...(currentContext || {}), address: addressValue },
           result: results,
-          reviewerDecisions: (results.issues || []).map((issue, idx) => ({
+          reviewerDecisions: displayIssues.map((issue, idx) => ({
             issue_number: idx + 1,
             room: issue.room,
             area: issue.area,

@@ -30,11 +30,6 @@ contextBridge.exposeInMainWorld('api', {
   // Send inspection data + results to KeepSimpleCRM
   sendToCrm: (data) => ipcRenderer.invoke('send-to-crm', data),
 
-  // AI backend config
-  getAiConfig: () => ipcRenderer.invoke('get-ai-config'),
-  setAiConfig: (config) => ipcRenderer.invoke('set-ai-config', config),
-  checkOllamaHealth: () => ipcRenderer.invoke('check-ollama-health'),
-
   // Listen for progress updates
   onProgress: (callback) => {
     ipcRenderer.on('progress', (event, data) => callback(data));

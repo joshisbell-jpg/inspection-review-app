@@ -10,31 +10,16 @@
 const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, ipcMain } = require('electron');
+const {
+  assembleV3Blob,
+  transformV3ToV2ForDisplay,
+  applyReviewerDecisions,
+} = require('./review-v3');
 
 // In packaged app, resources are in process.resourcesPath
 // In dev, they're in the project root
 const isPackaged = app.isPackaged;
 const resourcesPath = isPackaged ? process.resourcesPath : __dirname.replace(/[/\\]src$/, '');
-
-// ============================================
-// AI Backend Config (persisted to userData)
-// ============================================
-const AI_CONFIG_FILE = path.join(app.getPath('userData'), 'ai-config.json');
-
-function loadAiConfig() {
-  try {
-    if (fs.existsSync(AI_CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(AI_CONFIG_FILE, 'utf-8'));
-    }
-  } catch (e) {
-    console.warn('Failed to load AI config, using defaults:', e.message);
-  }
-  return { backend: 'claude' };
-}
-
-function saveAiConfig(config) {
-  fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-}
 
 // Load .env from app directory (user places it next to the .exe or in resources)
 const envPath = isPackaged
@@ -328,90 +313,6 @@ ipcMain.handle('fetch-inspection', async (event, url) => {
 });
 
 /**
- * Convert Anthropic-format messages to Ollama chat format.
- * Anthropic: [{ role, content: [{ type: 'text', text }, { type: 'image', source: { data } }] }]
- * Ollama:    [{ role, content: 'string', images: ['base64'] }]
- */
-function convertToOllamaMessages(anthropicMessages) {
-  return anthropicMessages.map(msg => {
-    if (typeof msg.content === 'string') {
-      return { role: msg.role, content: msg.content };
-    }
-    const textParts = [];
-    const images = [];
-    for (const block of msg.content) {
-      if (block.type === 'text') {
-        textParts.push(block.text);
-      } else if (block.type === 'image' && block.source?.data) {
-        images.push(block.source.data);
-      }
-    }
-    const result = { role: msg.role, content: textParts.join('\n') };
-    if (images.length > 0) {
-      result.images = images;
-    }
-    return result;
-  });
-}
-
-/**
- * Call Ollama (Gemma 4) for AI analysis.
- */
-async function callOllama(anthropicMessages) {
-  const ollamaMessages = convertToOllamaMessages(anthropicMessages);
-
-  // Debug: log what we're sending to Ollama
-  console.log(`[ollama] === OUTBOUND PAYLOAD ===`);
-  console.log(`[ollama] Total messages: ${ollamaMessages.length}`);
-  let totalPayloadBytes = 0;
-  for (let i = 0; i < ollamaMessages.length; i++) {
-    const msg = ollamaMessages[i];
-    const contentPreview = (msg.content || '').substring(0, 500);
-    const contentBytes = Buffer.byteLength(msg.content || '', 'utf-8');
-    const imageCount = msg.images?.length || 0;
-    const imageBytes = (msg.images || []).reduce((sum, img) => sum + img.length, 0);
-    totalPayloadBytes += contentBytes + imageBytes;
-
-    console.log(`[ollama] Message ${i}: role=${msg.role}, content=${contentBytes} bytes, images=${imageCount}`);
-    console.log(`[ollama]   Content preview: ${contentPreview}${(msg.content || '').length > 500 ? '...' : ''}`);
-    if (imageCount > 0) {
-      msg.images.forEach((img, j) => {
-        console.log(`[ollama]   [BASE64 IMAGE ${j} - ${img.length} bytes]`);
-      });
-    }
-  }
-  console.log(`[ollama] Total approximate payload size: ${(totalPayloadBytes / 1024).toFixed(1)} KB`);
-  console.log(`[ollama] === END PAYLOAD ===`);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 min timeout
-  try {
-    const response = await fetch('http://localhost:11434/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gemma4:e4b',
-        messages: ollamaMessages,
-        stream: false,
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`Ollama error (HTTP ${response.status}): ${errText}`);
-    }
-    const data = await response.json();
-    const content = data?.message?.content;
-    if (!content) {
-      throw new Error(`Ollama returned unexpected response: ${JSON.stringify(data).substring(0, 200)}`);
-    }
-    return content;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/**
  * Call Claude (Anthropic SDK) for AI analysis.
  */
 async function callClaude(anthropicMessages) {
@@ -421,216 +322,113 @@ async function callClaude(anthropicMessages) {
   });
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 16384,
+    max_tokens: 32768,
     messages: anthropicMessages,
   });
   return response.content[0].text;
 }
 
 /**
- * Wrap messages with strict JSON formatting instructions for Ollama/Gemma.
- * Prepends and appends enforcement text to the user message content array.
- */
-/**
- * Strip boilerplate from inspection text — remove repeated headers, page numbers,
- * image references, and other noise that inflates the payload without adding value.
- */
-function cleanInspectionText(text) {
-  return text
-    .split('\n')
-    .filter(line => {
-      const trimmed = line.trim();
-      // Drop empty lines
-      if (!trimmed) return false;
-      // Drop page number lines like "Page 3 of 149", "- 3 -", etc.
-      if (/^(Page\s+\d+\s+(of|\/)\s+\d+|[-–—]\s*\d+\s*[-–—])$/i.test(trimmed)) return false;
-      // Drop image/photo reference lines
-      if (/^(Image|Photo|Photograph|Attachment|IMG_)\s*[:#\d]/i.test(trimmed)) return false;
-      // Drop repeated headers (common in multi-page PDFs)
-      if (/^(Condition Summary|Inspection Report|Property Inspection|Move.?Out|Move.?In)\s*$/i.test(trimmed)) return false;
-      // Drop pure URL lines
-      if (/^https?:\/\/\S+$/.test(trimmed)) return false;
-      // Drop date-only lines
-      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(trimmed)) return false;
-      return true;
-    })
-    .join('\n');
-}
-
-/**
- * Reduce payload size for Ollama — strip images, trim text content.
- * Current inspection: max 20,000 chars. Previous inspection: max 10,000 chars.
- */
-function trimMessagesForOllama(messages) {
-  let isCurrent = true; // first inspection block is current, second is previous
-
-  return messages.map(msg => {
-    if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg;
-
-    const trimmedContent = [];
-    for (const block of msg.content) {
-      // Drop all image blocks — Gemma processes text from PDFs more reliably
-      if (block.type === 'image') continue;
-
-      if (block.type === 'text') {
-        let text = block.text;
-
-        // Detect inspection content blocks and trim them
-        if (text.includes('Extracted page text') || text.includes('cross-reference with screenshots')) {
-          text = cleanInspectionText(text);
-          const limit = isCurrent ? 20000 : 10000;
-          if (text.length > limit) {
-            text = text.substring(0, limit) + '\n[... text trimmed to ' + limit + ' chars for processing ...]';
-          }
-          // After first inspection text block, switch to previous limit
-          isCurrent = false;
-        }
-
-        // Drop screenshot reference lines from other text blocks
-        if (text.includes('Report screenshots') && text.includes('review EVERY page')) {
-          continue; // skip the "Report screenshots (N pages)" label since we dropped images
-        }
-        if (text.includes('Inspection photos') && text.includes(':')) {
-          continue; // skip the "Inspection photos (N):" label since we dropped images
-        }
-
-        trimmedContent.push({ type: 'text', text });
-      }
-    }
-
-    return { ...msg, content: trimmedContent };
-  });
-}
-
-function addOllamaJsonEnforcement(messages) {
-  const schemaExample = `Return ONLY this exact JSON structure, no other format:
-{
-  "issues": [
-    {
-      "title": "short issue title",
-      "location": "room or area",
-      "severity": "low|medium|high",
-      "description": "detailed description",
-      "isPreExisting": true or false
-    }
-  ],
-  "overall": "overall assessment text"
-}`;
-
-  return messages.map(msg => {
-    if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg;
-    return {
-      ...msg,
-      content: [
-        {
-          type: 'text',
-          text: 'You must respond with ONLY a JSON object. No explanation, no markdown, no code blocks. Start your response with { and end with }.\n\n' + schemaExample
-        },
-        ...msg.content,
-        {
-          type: 'text',
-          text: 'RESPOND WITH JSON ONLY using the exact schema specified above (issues array with title/location/severity/description/isPreExisting, and overall string). Begin your response with the opening brace {'
-        }
-      ]
-    };
-  });
-}
-
-/**
- * Normalize Ollama/Gemma response to the expected app format.
- * Handles Gemma's alternate structure: { overall_assessment, detailed_issues_by_area: [{ area, issues: [string] }] }
- */
-function normalizeOllamaResponse(parsed) {
-  // Already in expected format
-  if (Array.isArray(parsed.issues) && parsed.issues.length > 0 && parsed.issues[0].title) {
-    return parsed;
-  }
-
-  // Gemma alternate format: detailed_issues_by_area
-  if (Array.isArray(parsed.detailed_issues_by_area)) {
-    const issues = [];
-    for (const area of parsed.detailed_issues_by_area) {
-      const areaName = area.area || 'Unknown';
-      const areaIssues = Array.isArray(area.issues) ? area.issues : [];
-      for (const issue of areaIssues) {
-        const issueText = typeof issue === 'string' ? issue : (issue.description || issue.title || JSON.stringify(issue));
-        issues.push({
-          title: issueText,
-          location: areaName,
-          severity: (typeof issue === 'object' && issue.severity) || 'unknown',
-          description: issueText,
-          isPreExisting: (typeof issue === 'object' && issue.isPreExisting) || false,
-        });
-      }
-    }
-    return {
-      issues,
-      overall: parsed.overall_assessment || parsed.overall || '',
-    };
-  }
-
-  // Unknown format — return as-is so parseAnalysisResponse fallback handles it
-  return parsed;
-}
-
-/**
- * Process inspections with switchable AI backend
+ * Process inspections — Mission 3 Phase 2 V3 categorization with V2 soft fallback.
+ *
+ * Format selection (env var, default 'v3'):
+ *   AI_REVIEW_FORMAT=v3  → V3 prompt → assemble V3IssuesBlob → V2-flat _displayShape.
+ *                          On any V3 path failure, fall through to V2 (separate API call).
+ *   AI_REVIEW_FORMAT=v2  → V2 prompt only (legacy behavior).
+ *
+ * Soft-fallback rationale: a V3 failure costs ~$1-3 wasted on the failed call before
+ * V2 succeeds. Acceptable; bounded. Caller telemetry surfaces the failure cause.
  */
 ipcMain.handle('analyze-inspections', async (event, { newInspection, previousInspections, context }) => {
+  const aiReviewFormat = (process.env.AI_REVIEW_FORMAT || 'v3').toLowerCase();
+  const thresholdRaw = Number(process.env.AI_REVIEW_CONFIDENCE_THRESHOLD);
+  const threshold = Number.isFinite(thresholdRaw) ? thresholdRaw : 0.7;
+  const debug = process.env.AI_REVIEW_DEBUG === 'true';
+  const isComparisonMode = Array.isArray(previousInspections) && previousInspections.length > 0;
+
+  // V3 attempt with soft fallback
+  if (aiReviewFormat === 'v3') {
+    try {
+      if (debug) console.log(`[ai-review] V3 prompt — comparison=${isComparisonMode}, threshold=${threshold}`);
+      const v3Messages = isComparisonMode
+        ? buildV3ComparisonMessages(newInspection, previousInspections, context)
+        : buildV3SingleInspectionMessages(newInspection, context);
+
+      const rawV3Response = await callClaude(v3Messages);
+      if (debug) console.log('[ai-review] V3 raw response (first 2000 chars):', rawV3Response.substring(0, 2000));
+
+      const parsedAi = parseAnalysisResponse(rawV3Response);
+      if (!parsedAi || !Array.isArray(parsedAi.issues)) {
+        throw new Error('V3 prompt returned non-array issues');
+      }
+
+      const v3Blob = assembleV3Blob(parsedAi.issues, isComparisonMode, threshold);
+      const displayShape = transformV3ToV2ForDisplay(
+        v3Blob,
+        parsedAi.overall_condition,
+        parsedAi.summary,
+        isComparisonMode,
+      );
+
+      if (debug) {
+        const fallbackCount = countByPredicate(v3Blob, (i) => i.bucketAssignedBy === 'deterministic-fallback');
+        console.log(`[ai-review] V3 assembly — total=${v3Blob.totalIssues}, ` +
+          `cleaning=${groupIssueCount(v3Blob.buckets.cleaning)}, ` +
+          `make_ready=${groupIssueCount(v3Blob.buckets.make_ready)}, ` +
+          `exterior=${groupIssueCount(v3Blob.buckets.exterior)}, ` +
+          `keyword_fallback=${fallbackCount}`);
+        console.log(`[ai-review] V3 → V2 display: ${displayShape.issues.length} rows with _v3Id mapping`);
+      }
+
+      return {
+        success: true,
+        result: {
+          format: 'v3',
+          overall_condition: parsedAi.overall_condition,
+          summary: parsedAi.summary,
+          issues: v3Blob,
+          _displayShape: displayShape,
+        },
+      };
+    } catch (v3Error) {
+      // ALWAYS log this — not gated on debug.
+      console.warn('[ai-review] V3 emission failed — falling back to V2:', v3Error.message);
+      // fall through to V2 path
+    }
+  }
+
+  // V2 path (default when AI_REVIEW_FORMAT=v2, or fallback after V3 failure)
   try {
-    const config = loadAiConfig();
-    const messages = buildComparisonMessages(newInspection, previousInspections, context);
+    if (debug) console.log(`[ai-review] V2 prompt — comparison=${isComparisonMode}`);
+    const v2Messages = buildComparisonMessages(newInspection, previousInspections, context);
+    const rawV2Response = await callClaude(v2Messages);
+    if (debug) console.log('[ai-review] V2 raw response (first 2000 chars):', rawV2Response.substring(0, 2000));
 
-    let responseText;
-    const isOllama = config.backend !== 'claude';
-    if (!isOllama) {
-      responseText = await callClaude(messages);
-    } else {
-      const trimmed = trimMessagesForOllama(messages);
-      const enforced = addOllamaJsonEnforcement(trimmed);
-      responseText = await callOllama(enforced);
-      console.log('[ollama] Raw Gemma response (first 3000 chars):', responseText.substring(0, 3000));
-      console.log('[ollama] Raw Gemma response (last 500 chars):', responseText.substring(Math.max(0, responseText.length - 500)));
-    }
-
-    let result = parseAnalysisResponse(responseText);
-    if (isOllama) {
-      result = normalizeOllamaResponse(result);
-    }
+    const result = parseAnalysisResponse(rawV2Response);
+    result.format = 'v2'; // explicit so send-to-crm can branch
     return { success: true, result };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-// AI config IPC handlers
-ipcMain.handle('get-ai-config', () => loadAiConfig());
-
-ipcMain.handle('set-ai-config', (event, config) => {
-  const validBackends = ['gemma', 'claude'];
-  if (!validBackends.includes(config.backend)) {
-    return { success: false, error: `Invalid backend: ${config.backend}` };
+/**
+ * Helpers for V3 telemetry — kept tiny and local since they only exist for debug logs.
+ */
+function groupIssueCount(groups) {
+  if (!Array.isArray(groups)) return 0;
+  return groups.reduce((sum, g) => sum + (g.issues?.length || 0), 0);
+}
+function countByPredicate(v3Blob, predicate) {
+  let n = 0;
+  for (const bucketName of ['cleaning', 'make_ready', 'exterior']) {
+    for (const group of v3Blob.buckets[bucketName] || []) {
+      for (const issue of group.issues || []) if (predicate(issue)) n += 1;
+    }
   }
-  try {
-    saveAiConfig({ backend: config.backend });
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('check-ollama-health', async () => {
-  try {
-    const response = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(3000) });
-    if (!response.ok) return { available: false, hasModel: false };
-    const data = await response.json();
-    const modelNames = (data.models || []).map(m => m.name);
-    const hasModel = modelNames.some(n => n.includes('gemma4:e4b'));
-    return { available: true, hasModel };
-  } catch {
-    return { available: false, hasModel: false };
-  }
-});
+  for (const issue of v3Blob.manualIssues || []) if (predicate(issue)) n += 1;
+  return n;
+}
 
 /**
  * Send inspection data + results to KeepSimpleCRM
@@ -639,9 +437,83 @@ ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspect
   try {
     const crmUrl = process.env.CRM_API_URL || 'https://keepsimplecrm.com';
     const crmToken = process.env.CRM_API_TOKEN;
+    const debug = process.env.AI_REVIEW_DEBUG === 'true';
 
     if (!crmToken) {
       return { success: false, error: 'CRM_API_TOKEN not set in .env' };
+    }
+
+    // Build the analysisResult payload based on format. V3 bakes reviewer
+    // decisions into the V3IssuesBlob and omits the top-level reviewerDecisions
+    // array. V2 keeps the existing shape (preprocess on the CRM side injects
+    // format='v2').
+    let analysisResultPayload;
+    let reviewerDecisionsPayload;
+
+    if (result && result.format === 'v3') {
+      const displayedIssues = (result._displayShape && result._displayShape.issues) || [];
+
+      // Unconditional integrity warn (round-robin fix #1, item #4): if format=v3 but
+      // _displayShape is missing or empty while there are reviewer decisions to apply,
+      // we'd silently lose every decision. Surface this as an internal-bug signal even
+      // when AI_REVIEW_DEBUG is off — this is a data-integrity warning, not telemetry.
+      const hasDecisions = Array.isArray(reviewerDecisions) && reviewerDecisions.some(d => {
+        const v = typeof d === 'string' ? d : (d && d.decision);
+        return v && v !== 'unreviewed';
+      });
+      if (hasDecisions && displayedIssues.length === 0) {
+        console.warn('[ai-review] V3 save: result marked v3 but _displayShape is missing or empty — ' +
+          'reviewer decisions will not be applied. This indicates an internal bug in analyze-inspections.');
+      }
+
+      const { blob: finalV3Blob, mappedCount, unmappedCount } = applyReviewerDecisions(
+        result.issues,
+        reviewerDecisions,
+        displayedIssues,
+      );
+
+      // Unconditional data-loss warn (round-robin fix #2, item #5/#6): unmappedCount
+      // means the user clicked a decision but it landed nowhere. Always surface this,
+      // not just under debug — silent decision loss is exactly what the human reviewer
+      // is paid to prevent.
+      if (unmappedCount > 0) {
+        console.warn(`[ai-review] ${unmappedCount} reviewer decision(s) failed to map to V3 issues by _v3Id — ` +
+          `decisions LOST. Likely cause: _v3Id mismatch between display shape sent to renderer and V3 blob in main.`);
+      }
+
+      if (debug) {
+        console.log(`[ai-review] V3 reviewer decisions applied: mapped=${mappedCount}, unmapped=${unmappedCount}`);
+        console.log('[ai-review] V3 payload format=v3, totalIssues=' + finalV3Blob.totalIssues +
+          ', skipped=' + finalV3Blob.totalSkipped + ', unreviewed=' + finalV3Blob.totalUnreviewed);
+      }
+      analysisResultPayload = {
+        format: 'v3',
+        overall_condition: result.overall_condition,
+        summary: result.summary,
+        issues: finalV3Blob,
+      };
+      reviewerDecisionsPayload = undefined; // baked into V3 issues
+    } else {
+      // V2 path — unchanged shape from before this PR (CRM preprocess injects format='v2')
+      analysisResultPayload = result;
+      reviewerDecisionsPayload = reviewerDecisions;
+      if (debug) console.log('[ai-review] V2 payload — issues=' + ((result && result.issues && result.issues.length) || 0));
+    }
+
+    const body = {
+      address: context.address || currentInspection.property?.address,
+      unit: context.unit || currentInspection.property?.unit,
+      tenantName: context.tenant || currentInspection.property?.tenant,
+      securityDeposit: context.deposit ? Number(context.deposit) : undefined,
+      leaseDuration: context.leaseDuration,
+      currentInspectionUrl: currentInspection.url,
+      previousInspectionUrls: previousInspections.map(p => p.url),
+      currentInspectionData: currentInspection,
+      previousInspectionsData: previousInspections,
+      analysisResult: analysisResultPayload,
+    };
+    if (reviewerDecisionsPayload !== undefined) {
+      body.reviewerDecisions = reviewerDecisionsPayload;
     }
 
     const response = await fetch(`${crmUrl}/api/inspections/ai-review`, {
@@ -650,19 +522,7 @@ ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspect
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${crmToken}`,
       },
-      body: JSON.stringify({
-        address: context.address || currentInspection.property?.address,
-        unit: context.unit || currentInspection.property?.unit,
-        tenantName: context.tenant || currentInspection.property?.tenant,
-        securityDeposit: context.deposit ? Number(context.deposit) : undefined,
-        leaseDuration: context.leaseDuration,
-        currentInspectionUrl: currentInspection.url,
-        previousInspectionUrls: previousInspections.map(p => p.url),
-        currentInspectionData: currentInspection,
-        previousInspectionsData: previousInspections,
-        analysisResult: result,
-        reviewerDecisions: reviewerDecisions,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -1435,6 +1295,259 @@ IMPORTANT:
   });
 
   return [{ role: 'user', content }];
+}
+
+// ============================================================================
+// V3 prompt builders (Mission 3 Phase 2 — categorized buckets)
+// ============================================================================
+
+/**
+ * Shared bucket definitions + emission rules used by both V3 prompt builders.
+ * Kept as one constant so the comparison and single-inspection prompts stay
+ * in sync — drift between them would produce inconsistent AI output.
+ */
+const V3_BUCKET_AND_FORMAT_INSTRUCTIONS = `
+## Categorization buckets
+
+Every issue you find must be assigned to exactly one bucket. Pick the bucket
+that best describes the *remediation work*, not just the symptom.
+
+- **cleaning** — cosmetic issues resolved by cleaning alone. No materials are
+  replaced. Examples: dust, dirt, smudges, fingerprints, light stains, cobwebs,
+  soap scum, mildew (surface), pet hair, food residue.
+
+- **make_ready** — repair, patching, replacement, painting; materials and labor
+  beyond cleaning. Examples: holes in drywall, cracks, broken fixtures, missing
+  hardware, scratches in flooring, paint touch-ups, mold (deep), leaks, torn
+  carpet, warped trim, faulty outlets.
+
+- **exterior** — anything outside the building envelope. Examples: yard, fence,
+  gate, driveway, sidewalk, siding, roof, gutters, downspouts, exterior light
+  fixtures, A/C condenser unit, mailbox, soffits, brick veneer, sprinkler.
+
+When borderline, prefer the bucket the property manager would assign work to.
+A grease-stained range hood that wipes off → cleaning. A range hood that needs
+repainting → make_ready.
+
+## Confidence scoring (bucketConfidence)
+
+Emit a number from 0.0 to 1.0 for every issue:
+- 0.9–1.0: bucket is unambiguous (a hole in drywall is clearly make_ready).
+- 0.6–0.8: bucket is reasonable but could be argued (heavy stain that might
+  clean off vs. need re-finishing).
+- < 0.6: genuinely ambiguous — the system will fall back to keyword matching.
+
+Be honest. A confident wrong bucket is worse than a low-confidence bucket the
+fallback can correct.
+
+## Grouping (groupKey + groupLabel)
+
+When the SAME type of issue appears in multiple rooms, emit the same
+\`groupKey\` (kebab-case slug) and \`groupLabel\` (human-readable) on each
+issue. The system collapses identical groupKeys into one group so the reviewer
+sees them together.
+
+Examples:
+- "Baseboards — dusty" in 5 rooms → groupKey: "baseboards-dusty",
+  groupLabel: "Baseboards — Dusty"
+- "Outlet cover missing" in 3 rooms → groupKey: "outlet-cover-missing",
+  groupLabel: "Outlet Cover — Missing"
+
+Distinct issues get distinct groupKeys. Don't over-group: a stained countertop
+and a stained cabinet are different.
+
+## Severity enum (strict)
+
+Use exactly one of: \`minor\`, \`moderate\`, \`major\`. Do not invent values.
+
+## Page references
+
+When the screenshots show a page number (e.g., "Page 3 of 149"), include the
+integer in \`pageReferences\` (e.g., \`[3]\`). If multiple pages document the
+same issue, include all (\`[3, 4]\`). If no page number is visible, emit \`[]\`.
+
+## Output schema (strict — return ONLY this JSON, no prose, no code fences)
+
+{
+  "overall_condition": "excellent|good|fair|poor",
+  "summary": "2-3 sentence overview of what you found",
+  "issues": [
+    {
+      "room": "Kitchen",
+      "area": "Countertop near sink",
+      "description": "Dark ring stain approximately 4 inches across, appears to be from a hot pot",
+      "severity": "moderate",
+      "pageReferences": [4],
+      "isNewSinceMoveIn": true,
+      "moveInNote": "Optional context if relevant — omit if not",
+      "bucket": "cleaning",
+      "bucketConfidence": 0.7,
+      "groupKey": "countertops-stained",
+      "groupLabel": "Countertops — Stained"
+    }
+  ]
+}
+`;
+
+/**
+ * Build V3 comparison-mode messages (move-out vs move-in).
+ * Same content layout as buildComparisonMessages but asks for the V3 schema.
+ */
+function buildV3ComparisonMessages(newInspection, previousInspections, context) {
+  const content = [];
+
+  const propertyInfo = `Property: ${context.address || newInspection.property?.address || 'Property'}
+Unit: ${context.unit || newInspection.property?.unit || ''}
+Tenant: ${context.tenant || newInspection.property?.tenant || 'Tenant'}
+Lease Duration: ${context.leaseDuration || 'Not specified'}`;
+
+  const hasTableData = newInspection.tableData?.length > 0;
+  const tableInstruction = hasTableData
+    ? `\n\nA structured table has also been extracted as text. Cross-reference it with the screenshots to ensure you don't miss any items.`
+    : '';
+
+  content.push({
+    type: 'text',
+    text: `You are a property inspection analyst. Your job is to FIND every issue and CATEGORIZE each one — a human reviewer will decide liability.
+
+${propertyInfo}
+
+TASK: Compare the MOVE-OUT inspection against the MOVE-IN inspection. For every issue you find:
+1. Describe exactly what you see
+2. Note the room and specific area
+3. Categorize into one of three buckets (see below)
+4. Score how confident you are about the bucket
+5. Reference the page number when visible
+6. Set isNewSinceMoveIn = true when the move-in inspection did NOT show this issue,
+   false when it did (i.e., pre-existing)
+${tableInstruction}
+
+IMPORTANT:
+- List EVERY issue you can find, even minor ones — the reviewer will skip what doesn't matter
+- Do NOT decide who is responsible — the reviewer assigns Tenant/Owner/Normal Wear
+- Do NOT estimate costs — that is the reviewer's job
+- DO note if an issue appears in the move-in photos/data
+- Be specific about location: "left wall near window" not just "wall"
+- Go through EVERY screenshot page — the condition summary spans multiple pages
+- Cross-reference the extracted text data if provided
+- Inspections may have 50-100+ issues spanning 20+ pages. Do NOT stop early. Find ALL issues across ALL rooms including bedrooms, bathrooms, systems, garage, and exterior.
+- BOTH inspections (move-out AND move-in) have full data. Check every item.
+
+${V3_BUCKET_AND_FORMAT_INSTRUCTIONS}`,
+  });
+
+  appendInspectionContent(content, newInspection, 'MOVE-OUT INSPECTION (Current Condition)');
+
+  const moveIn = previousInspections[0];
+  if (moveIn) {
+    appendInspectionContent(content, moveIn, 'MOVE-IN INSPECTION (Baseline)');
+  } else {
+    content.push({ type: 'text', text: '\n\n## NO MOVE-IN INSPECTION PROVIDED\nAnalyze only the current condition.\n' });
+  }
+
+  content.push({
+    type: 'text',
+    text: '\n\nReturn the JSON object now. No markdown code fences. No explanation. Begin with { and end with }.',
+  });
+
+  return [{ role: 'user', content }];
+}
+
+/**
+ * Build V3 single-inspection-mode messages (no comparison baseline).
+ * AI sets isNewSinceMoveIn=true uniformly; orchestrator overrides liability
+ * to 'unassigned' for all issues per Q14.
+ */
+function buildV3SingleInspectionMessages(currentInspection, context) {
+  const content = [];
+
+  const propertyInfo = `Property: ${context.address || currentInspection.property?.address || 'Property'}
+Unit: ${context.unit || currentInspection.property?.unit || ''}
+Tenant: ${context.tenant || currentInspection.property?.tenant || 'Tenant'}
+Lease Duration: ${context.leaseDuration || 'Not specified'}`;
+
+  const hasTableData = currentInspection.tableData?.length > 0;
+  const tableInstruction = hasTableData
+    ? `\n\nA structured table has also been extracted as text. Cross-reference it with the screenshots to ensure you don't miss any items.`
+    : '';
+
+  content.push({
+    type: 'text',
+    text: `You are a property inspection analyst. Your job is to FIND every issue and CATEGORIZE each one — a human reviewer will decide liability.
+
+${propertyInfo}
+
+TASK: Review this inspection and catalog every issue. For each issue:
+1. Describe exactly what you see
+2. Note the room and specific area
+3. Categorize into one of three buckets (see below)
+4. Score your confidence about the bucket
+5. Reference the page number when visible
+6. Set isNewSinceMoveIn = true (no move-in baseline provided; the reviewer will assign liability)
+${tableInstruction}
+
+IMPORTANT:
+- List EVERY issue you can find, even minor ones — the reviewer will skip what doesn't matter
+- Do NOT decide who is responsible — the reviewer assigns Tenant/Owner/Normal Wear
+- Do NOT estimate costs — that is the reviewer's job
+- Be specific about location: "left wall near window" not just "wall"
+- Go through EVERY screenshot page — the condition summary spans multiple pages
+- Cross-reference the extracted text data if provided
+- Inspections may have 50-100+ issues spanning 20+ pages. Do NOT stop early. Find ALL issues across ALL rooms including bedrooms, bathrooms, systems, garage, and exterior.
+
+${V3_BUCKET_AND_FORMAT_INSTRUCTIONS}`,
+  });
+
+  appendInspectionContent(content, currentInspection, 'INSPECTION (Current Condition)');
+
+  content.push({
+    type: 'text',
+    text: '\n\nReturn the JSON object now. No markdown code fences. No explanation. Begin with { and end with }.',
+  });
+
+  return [{ role: 'user', content }];
+}
+
+/**
+ * Shared inspection-content appender used by V3 prompt builders. Mirrors the
+ * inner helper inside buildComparisonMessages so V3 sees the same screenshots,
+ * photos, text, and table data the V2 prompt sees.
+ */
+function appendInspectionContent(content, inspection, label) {
+  content.push({ type: 'text', text: `\n\n## ${label}\n` });
+
+  if (inspection.screenshots?.length > 0) {
+    content.push({ type: 'text', text: `Report screenshots (${inspection.screenshots.length} pages — review EVERY page for issues):` });
+    for (const shot of inspection.screenshots) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: shot },
+      });
+    }
+  }
+
+  if (inspection.photos?.length > 0) {
+    content.push({ type: 'text', text: `\nInspection photos (${inspection.photos.length}):` });
+    for (const photo of inspection.photos.slice(0, 10)) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: photo.mediaType || 'image/jpeg', data: photo.base64 },
+      });
+    }
+  }
+
+  if (inspection.textContent) {
+    content.push({ type: 'text', text: `\nExtracted page text (cross-reference with screenshots):\n${inspection.textContent}` });
+  }
+
+  if (inspection.tableData?.length > 0) {
+    let tableText = `\nStructured table data (${inspection.tableData.length} rows — cross-reference with screenshots):\n`;
+    tableText += 'Row# | Room | Detail | Condition | Actions | Comment\n';
+    inspection.tableData.forEach((row, i) => {
+      tableText += `${i + 1} | ${row.room} | ${row.detail} | ${row.condition} | ${row.actions} | ${row.comment}\n`;
+    });
+    content.push({ type: 'text', text: tableText });
+  }
 }
 
 /**
