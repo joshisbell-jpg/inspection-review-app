@@ -320,11 +320,29 @@ async function callClaude(anthropicMessages) {
   const anthropic = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
   });
+
+  const totalInputChars = anthropicMessages.reduce((sum, m) => {
+    if (typeof m.content === 'string') return sum + m.content.length;
+    if (Array.isArray(m.content)) return sum + m.content.reduce((s, c) => s + (c.text?.length || 0), 0);
+    return sum;
+  }, 0);
+  console.log(`[ai-review] sending ~${totalInputChars} chars (~${Math.ceil(totalInputChars / 4)} tokens) to Claude`);
+
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 32768,
     messages: anthropicMessages,
   });
+
+  if (response.usage) {
+    console.log(`[ai-review] Claude response: ${response.usage.input_tokens} input tokens, ${response.usage.output_tokens} output tokens, stop_reason=${response.stop_reason}`);
+  } else {
+    console.log(`[ai-review] Claude response: usage unavailable, stop_reason=${response.stop_reason}`);
+  }
+  if (response.stop_reason === 'max_tokens') {
+    console.warn('[ai-review] WARNING: response hit max_tokens cap, output may be truncated');
+  }
+
   return response.content[0].text;
 }
 
@@ -545,6 +563,7 @@ ipcMain.handle('parse-pdf', async (event, filePath) => {
     const buffer = fs.readFileSync(filePath);
     const data = await pdfParse(buffer);
     const text = data.text || '';
+    console.log(`[parse-pdf] extracted ${text.length} chars from ${data.numpages} pages`);
 
     // Detect platform from PDF content
     let platform = 'unknown';
