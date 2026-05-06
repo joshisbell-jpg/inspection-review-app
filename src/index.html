@@ -426,6 +426,83 @@
       font-size: 13px; color: var(--text-secondary); margin-top: 6px;
     }
 
+    /* ----- Mission 7.2 Phase B: login screen + user indicator ----- */
+
+    .login-screen {
+      display: none;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .login-screen.active { display: flex; }
+    body.login-mode .container { display: none; }
+
+    .login-card { max-width: 440px; width: 100%; }
+    .login-card h2 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+    .login-card .subtitle { margin-bottom: 24px; }
+    .login-card .input-section { margin-bottom: 16px; }
+    .login-card .input-section:last-of-type { margin-bottom: 20px; }
+    .login-card input[type="email"],
+    .login-card input[type="password"] {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-family: inherit;
+      font-size: 14px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+    .login-card .login-error {
+      display: none;
+      margin-bottom: 20px;
+      margin-top: 0;
+    }
+    .login-card .login-error.active { display: block; }
+    .login-card #login-submit {
+      width: 100%;
+      justify-content: center;
+    }
+    .login-card .login-help {
+      text-align: center;
+      margin-top: 16px;
+      font-size: 13px;
+    }
+    .login-card .login-help a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .login-card .login-help a:hover { text-decoration: underline; }
+
+    .btn-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .user-header { padding: 12px 20px; }
+    .user-header-content {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      justify-content: flex-end;
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+    .user-header-name { color: var(--text-primary); font-weight: 500; }
+    .user-header-sep { color: var(--text-tertiary); }
+    .user-header-name, .user-header-org {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .btn-small { padding: 6px 12px; font-size: 13px; }
+
   </style>
 </head>
 <body>
@@ -433,7 +510,51 @@
     Inspection Review Tool
   </div>
 
+  <!-- Mission 7.2 Phase B: login screen. Hidden by default; B6 bootstrap
+       activates it on launch when getAuthState() reports unauthenticated,
+       and again when the main process emits auth-expired. While active,
+       body.login-mode hides the .container below. -->
+  <div id="login-screen" class="login-screen">
+    <div class="card login-card">
+      <h2>Sign in to KeepSimpleCRM</h2>
+      <p class="subtitle">Inspection Review Tool</p>
+
+      <div class="error-box login-error" id="login-error">
+        <p id="login-error-message"></p>
+      </div>
+
+      <div class="input-section">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" autocomplete="username" autocapitalize="none" spellcheck="false" />
+      </div>
+      <div class="input-section">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" autocomplete="current-password" />
+      </div>
+
+      <button class="btn btn-primary" id="login-submit">
+        <span id="login-submit-label">Sign in</span>
+        <span class="btn-spinner" id="login-spinner" style="display:none"></span>
+      </button>
+
+      <p class="login-help">
+        <a href="#" id="forgot-password-link">Forgot password?</a>
+      </p>
+    </div>
+  </div>
+
   <div class="container">
+    <!-- Mission 7.2 Phase B: user indicator. Hidden until auth-state
+         resolves authenticated; populated and shown by B6 bootstrap. -->
+    <div class="card user-header" id="user-header" style="display:none">
+      <div class="user-header-content">
+        <span class="user-header-name" id="user-header-name"></span>
+        <span class="user-header-sep">·</span>
+        <span class="user-header-org" id="user-header-org"></span>
+        <button class="btn btn-secondary btn-small" id="logout-btn">Logout</button>
+      </div>
+    </div>
+
     <h1>Inspection Review</h1>
     <p class="subtitle">Paste inspection links to analyze and generate reports</p>
 
@@ -1224,7 +1345,10 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       }
     });
 
-    document.getElementById('start-new').addEventListener('click', () => {
+    // Mission 7.2 Phase B: extracted from #start-new so the logout handler
+    // can reset to the same blank slate before showing the login screen.
+    // The auth-expired handler must NOT call this — see onAuthExpired below.
+    function resetAllInFlightState() {
       resultsSection.classList.remove('active');
       inputSection.style.display = 'block';
       currentLinkInput.value = '';
@@ -1266,7 +1390,176 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       loginBtn.textContent = 'Step 1: Login to Platforms';
       startBtn.textContent = 'Step 2: Process Inspection';
       startBtn.classList.remove('btn-success');
+    }
+
+    document.getElementById('start-new').addEventListener('click', () => {
+      resetAllInFlightState();
     });
+
+    // ============================================
+    // Mission 7.2 Phase B: auth bootstrap + handlers
+    // ============================================
+    //
+    // Two distinct lifetimes meet here, and the renderer must keep them
+    // separate:
+    //
+    //   Disk lifetime (main process owns):
+    //     credentials.bin lives in %APPDATA%/Inspection Review/. Cleared by
+    //     logout, by the 401 path in send-to-crm, and by corruption recovery
+    //     in credential-store.js. The renderer never touches the disk.
+    //
+    //   In-memory inspection lifetime (renderer owns):
+    //     currentInspection, prevInspections, currentContext, results,
+    //     displayIssues, reviewDecisions — plus DOM state for the property-
+    //     address input and the reviewer decision buttons. Reset only by
+    //     the explicit "New Review" button (#start-new) and by logout
+    //     (which is an explicit user signal that work is done). Auth-
+    //     expired must NOT reset these — the user needs to re-login and
+    //     finish saving the inspection they were already reviewing.
+
+    const loginScreen = document.getElementById('login-screen');
+    const userHeader = document.getElementById('user-header');
+    const userHeaderName = document.getElementById('user-header-name');
+    const userHeaderOrg = document.getElementById('user-header-org');
+    const loginEmail = document.getElementById('login-email');
+    const loginPassword = document.getElementById('login-password');
+    const loginSubmit = document.getElementById('login-submit');
+    const loginSubmitLabel = document.getElementById('login-submit-label');
+    const loginSpinner = document.getElementById('login-spinner');
+    const loginErrorBox = document.getElementById('login-error');
+    const loginErrorMessage = document.getElementById('login-error-message');
+    const logoutBtn = document.getElementById('logout-btn');
+    const forgotPasswordLink = document.getElementById('forgot-password-link');
+
+    function showAuthenticatedUI({ user, organization }) {
+      document.body.classList.remove('login-mode');
+      loginScreen.classList.remove('active');
+      userHeaderName.textContent = user.name;
+      userHeaderOrg.textContent = organization.name;
+      userHeader.style.display = '';
+    }
+
+    function showLoginScreen({ prefillEmail = null } = {}) {
+      document.body.classList.add('login-mode');
+      loginScreen.classList.add('active');
+      userHeader.style.display = 'none';
+      hideLoginError();
+      if (prefillEmail) loginEmail.value = prefillEmail;
+      loginPassword.value = '';
+      // Defer focus until after layout settles.
+      setTimeout(() => {
+        if (loginEmail.value) loginPassword.focus();
+        else loginEmail.focus();
+      }, 50);
+    }
+
+    function setLoginInFlight(inFlight) {
+      loginSubmit.disabled = inFlight;
+      loginEmail.disabled = inFlight;
+      loginPassword.disabled = inFlight;
+      loginSpinner.style.display = inFlight ? 'inline-block' : 'none';
+      loginSubmitLabel.textContent = inFlight ? 'Signing in...' : 'Sign in';
+    }
+
+    function showLoginError(message) {
+      loginErrorMessage.textContent = message;
+      loginErrorBox.classList.add('active');
+    }
+
+    function hideLoginError() {
+      loginErrorBox.classList.remove('active');
+    }
+
+    // STOP GATE 1 refinement: PERSIST_FAILED is checked before status === 0
+    // so a disk-write failure after a successful 200 response doesn't get
+    // mis-reported as "Could not reach server."
+    function mapLoginError(res) {
+      if (res.error === 'PERSIST_FAILED') {
+        return 'Login succeeded but credentials could not be saved to disk. Try again or contact support.';
+      }
+      if (res.status === 423 && res.lockedUntil) {
+        const mins = Math.max(1, Math.ceil((new Date(res.lockedUntil) - new Date()) / 60000));
+        return `Your account is temporarily locked due to too many failed login attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'} or contact your administrator.`;
+      }
+      if (res.status === 403) {
+        return 'Your account has been deactivated. Contact your administrator to restore access.';
+      }
+      if (res.status === 401 && typeof res.remainingAttempts === 'number') {
+        return `Invalid email or password. (${res.remainingAttempts} attempt${res.remainingAttempts === 1 ? '' : 's'} remaining before lockout.)`;
+      }
+      if (res.status === 401) {
+        return 'Invalid email or password.';
+      }
+      if (res.status === 0) {
+        return 'Could not reach server. Check your connection and try again.';
+      }
+      return res.error || `Login failed (status ${res.status}).`;
+    }
+
+    async function handleLoginSubmit() {
+      const email = loginEmail.value.trim();
+      const password = loginPassword.value;
+      if (!email || !password) {
+        showLoginError('Please enter your email and password.');
+        return;
+      }
+      hideLoginError();
+      setLoginInFlight(true);
+      try {
+        const res = await window.api.electronLogin({ email, password });
+        if (res.success) {
+          showAuthenticatedUI({ user: res.user, organization: res.organization });
+        } else {
+          showLoginError(mapLoginError(res));
+        }
+      } catch (err) {
+        showLoginError('Could not reach server. Check your connection and try again.');
+      } finally {
+        setLoginInFlight(false);
+      }
+    }
+
+    loginSubmit.addEventListener('click', handleLoginSubmit);
+    loginEmail.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleLoginSubmit(); });
+    loginPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleLoginSubmit(); });
+
+    logoutBtn.addEventListener('click', async () => {
+      // Logout is an explicit user signal — wipe in-flight state too.
+      const lastEmail = loginEmail.value || null;
+      await window.api.electronLogout();
+      resetAllInFlightState();
+      showLoginScreen({ prefillEmail: lastEmail });
+    });
+
+    forgotPasswordLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.api.openExternalUrl('https://www.keepsimplecrm.com/forgot-password');
+    });
+
+    // auth-expired (HARD requirement): preserve in-memory inspection state
+    // across the login takeover. Do NOT call resetAllInFlightState here.
+    // Variables and DOM state must survive so the user can re-login and
+    // click Save to CRM again with their reviewer decisions intact.
+    window.api.onAuthExpired(() => {
+      console.log('[auth] auth-expired event received in renderer — switching to login screen');
+      showLoginScreen({ prefillEmail: loginEmail.value || null });
+      showLoginError('Your session has expired. Please log in again.');
+    });
+
+    // Bootstrap: decide which view to show on launch.
+    (async () => {
+      try {
+        const state = await window.api.getAuthState();
+        if (state.authenticated) {
+          showAuthenticatedUI({ user: state.user, organization: state.organization });
+        } else {
+          showLoginScreen({ prefillEmail: state.lastEmail });
+        }
+      } catch (err) {
+        console.warn('[auth] getAuthState failed at startup, defaulting to login screen: ' + err.message);
+        showLoginScreen();
+      }
+    })();
   </script>
 </body>
 </html>

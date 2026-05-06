@@ -9,12 +9,13 @@
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
 const {
   assembleV3Blob,
   transformV3ToV2ForDisplay,
   applyReviewerDecisions,
 } = require('./review-v3');
+const credentialStore = require('./credential-store');
 
 // In packaged app, resources are in process.resourcesPath
 // In dev, they're in the project root
@@ -125,6 +126,146 @@ app.on('activate', () => {
 // ============================================
 // IPC Handlers - Communication with the UI
 // ============================================
+
+// --------------------------------------------
+// Auth IPC handlers (Mission 7.2 Phase B)
+// --------------------------------------------
+//
+// electron-login takes {email, password}, posts to CRM_LOGIN_URL/api/auth/
+// electron-login. On 200 it persists credentials.bin (encrypted) and
+// preferences.json (plaintext lastEmail), and returns {success, user,
+// organization}. On 401/403/409/423 it returns {success:false, status,
+// error, lockedUntil?, remainingAttempts?}. Network failure → status 0.
+//
+// electron-logout reads creds, POSTs to serverWwwUrl/api/auth/electron-
+// logout with Bearer plaintextKey, and ALWAYS clears credentials.bin
+// regardless of server response — server-side failure must not strand
+// the user logged in client-side.
+//
+// auth-state never exposes plaintextKey to the renderer. It returns
+// either {authenticated: true, user, organization, serverWwwUrl} or
+// {authenticated: false, lastEmail}.
+//
+// open-external-url whitelists URLs starting with the production CRM
+// origin. On a non-matching URL it logs and returns silently — does NOT
+// throw — so a misuse from the renderer doesn't surface as an unhandled
+// promise rejection.
+
+ipcMain.handle('electron-login', async (event, { email, password }) => {
+  console.log('[auth] login attempt: ' + email);
+  const loginUrl = process.env.CRM_LOGIN_URL || 'https://www.keepsimplecrm.com';
+
+  let response;
+  try {
+    response = await fetch(`${loginUrl}/api/auth/electron-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (err) {
+    console.log('[auth] login failed: status=0 reason=network: ' + err.message);
+    return { success: false, status: 0, error: 'NETWORK' };
+  }
+
+  let body = {};
+  try {
+    body = await response.json();
+  } catch (e) {
+    // body parse failure on non-200 is acceptable; on 200 it's a bug
+    if (response.ok) {
+      console.log('[auth] login failed: 200 with unparseable body');
+      return { success: false, status: response.status, error: 'INVALID_RESPONSE' };
+    }
+  }
+
+  if (!response.ok) {
+    console.log(`[auth] login failed: status=${response.status} reason=${body.error || 'unknown'}`);
+    return {
+      success: false,
+      status: response.status,
+      error: body.error,
+      lockedUntil: body.lockedUntil,
+      remainingAttempts: body.remainingAttempts,
+    };
+  }
+
+  // 200 path — persist creds and prefs.
+  try {
+    await credentialStore.writeCredentials({
+      plaintextKey: body.plaintextKey,
+      userId: body.user.id,
+      userName: body.user.name,
+      userEmail: body.user.email,
+      organizationId: body.organization.id,
+      organizationName: body.organization.name,
+      serverWwwUrl: body.serverWwwUrl,
+      createdAt: new Date().toISOString(),
+    });
+    await credentialStore.writePreferences({ lastEmail: email });
+  } catch (err) {
+    console.log('[auth] login success but credential persist failed: ' + err.message);
+    return { success: false, status: 0, error: 'PERSIST_FAILED' };
+  }
+
+  console.log(`[auth] login success: userId=${body.user.id} orgId=${body.organization.id}`);
+  return {
+    success: true,
+    user: { id: body.user.id, name: body.user.name, email: body.user.email },
+    organization: { id: body.organization.id, name: body.organization.name },
+  };
+});
+
+ipcMain.handle('electron-logout', async () => {
+  const creds = await credentialStore.readCredentials();
+  if (!creds) {
+    return { success: true };
+  }
+
+  try {
+    const response = await fetch(`${creds.serverWwwUrl}/api/auth/electron-logout`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.plaintextKey}` },
+    });
+    if (response.status !== 204) {
+      console.log(`[auth] logout server returned ${response.status}, credentials cleared locally anyway`);
+    }
+  } catch (err) {
+    console.log(`[auth] logout server unreachable, credentials cleared locally anyway: ${err.message}`);
+  }
+
+  await credentialStore.clearCredentials();
+  console.log('[auth] logout success');
+  return { success: true };
+});
+
+ipcMain.handle('auth-state', async () => {
+  const creds = await credentialStore.readCredentials();
+  if (creds) {
+    return {
+      authenticated: true,
+      user: { id: creds.userId, name: creds.userName, email: creds.userEmail },
+      organization: { id: creds.organizationId, name: creds.organizationName },
+      serverWwwUrl: creds.serverWwwUrl,
+    };
+  }
+  const prefs = await credentialStore.readPreferences();
+  return { authenticated: false, lastEmail: prefs.lastEmail };
+});
+
+ipcMain.handle('open-external-url', async (event, url) => {
+  // Whitelist: only the production CRM origin. Renderer should only ever
+  // pass the forgot-password URL today.
+  const ALLOWED_PREFIX = 'https://www.keepsimplecrm.com/';
+  if (typeof url !== 'string' || !url.startsWith(ALLOWED_PREFIX)) {
+    console.log(`[security] blocked openExternal to ${url}`);
+    return;
+  }
+  await shell.openExternal(url);
+});
+
+// --------------------------------------------
+// Existing handlers
+// --------------------------------------------
 
 /**
  * Initialize browser with user's existing session
@@ -453,13 +594,24 @@ function countByPredicate(v3Blob, predicate) {
  */
 ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspections, context, result, reviewerDecisions }) => {
   try {
-    const crmUrl = process.env.CRM_API_URL || 'https://keepsimplecrm.com';
-    const crmToken = process.env.CRM_API_TOKEN;
-    const debug = process.env.AI_REVIEW_DEBUG === 'true';
-
-    if (!crmToken) {
-      return { success: false, error: 'CRM_API_TOKEN not set in .env' };
+    // Mission 7.2 Phase B: read auth state from safeStorage instead of .env.
+    // crmUrl now comes from the serverWwwUrl returned by /api/auth/electron-
+    // login (locked at login time, defends against URL drift). Plaintext key
+    // is the per-user CRM API key issued by that same login response.
+    const creds = await credentialStore.readCredentials();
+    if (!creds) {
+      // Defensive: the renderer should have prompted a login before we ever
+      // got called, but if creds vanished mid-session (manual file delete,
+      // disk error), surface as auth-expired so the renderer falls back to
+      // the login screen. See B6 onAuthExpired handler — that handler does
+      // NOT clear in-memory inspection state. Two different surfaces, two
+      // different lifetimes — disk vs renderer memory.
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'NOT_AUTHENTICATED' };
     }
+    const crmUrl = creds.serverWwwUrl;
+    const crmToken = creds.plaintextKey;
+    const debug = process.env.AI_REVIEW_DEBUG === 'true';
 
     // Build the analysisResult payload based on format. V3 bakes reviewer
     // decisions into the V3IssuesBlob and omits the top-level reviewerDecisions
@@ -542,6 +694,18 @@ ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspect
       },
       body: JSON.stringify(body),
     });
+
+    if (response.status === 401) {
+      // Server says this key is no longer valid — wipe it on disk and tell
+      // the renderer to switch to the login screen. The renderer must NOT
+      // reset in-memory inspection state on auth-expired; the user should be
+      // able to re-login and click Save to CRM again with their decisions
+      // intact. See B6 for the renderer-side preservation contract.
+      console.log('[auth] 401 detected during send-to-crm — clearing credentials, prompting re-login');
+      await credentialStore.clearCredentials();
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'AUTH_EXPIRED' };
+    }
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
