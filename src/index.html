@@ -1006,6 +1006,11 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
         
         if (!analysisResult.success) {
           updateProgressItem('analysis', 'error');
+          // Auth codes route through onAuthExpired (login screen takeover); suppress
+          // the generic "Analysis failed" banner to avoid double-surfacing the same event.
+          if (analysisResult.error === 'AUTH_EXPIRED' || analysisResult.error === 'NOT_AUTHENTICATED') {
+            return; // login screen already showing, in-memory state preserved per Phase B contract
+          }
           throw new Error('Analysis failed: ' + analysisResult.error);
         }
         

@@ -454,37 +454,83 @@ ipcMain.handle('fetch-inspection', async (event, url) => {
 });
 
 /**
- * Call Claude (Anthropic SDK) for AI analysis.
+ * Call the KeepSimpleCRM AI analysis proxy.
+ *
+ * Mission 7.2 Phase D: replaces direct Anthropic SDK use in the Electron
+ * client. The server proxy (POST /api/inspections/ai-analyze) holds
+ * ANTHROPIC_API_KEY; distributed installers no longer ship it. Auth is the
+ * per-user CRM API key issued at electron-login (Mission 7.2 Phase A) and
+ * persisted via safeStorage (Phase B). Model + max_tokens are fixed
+ * server-side, so future model upgrades are a one-line CRM change with no
+ * Electron rebuild.
+ *
+ * Errors carry a typed `.code` so analyze-inspections can branch:
+ *   NOT_AUTHENTICATED — no creds on disk; renderer should already be on the
+ *                       login screen (auth-expired event also emitted).
+ *   AUTH_EXPIRED      — server returned 401 (key revoked mid-session);
+ *                       creds wiped, auth-expired emitted.
+ *   NETWORK_ERROR     — fetch threw (DNS/refused/offline).
+ *   (no .code)        — proxy 4xx/5xx with .message for the UI.
  */
 async function callClaude(anthropicMessages) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
+  const creds = await credentialStore.readCredentials();
+  if (!creds) {
+    // Mirrors the send-to-crm pre-flight: if creds vanished mid-session,
+    // surface as auth-expired so the renderer routes back to login.
+    mainWindow?.webContents.send('auth-expired');
+    const e = new Error('Not authenticated');
+    e.code = 'NOT_AUTHENTICATED';
+    throw e;
+  }
 
   const totalInputChars = anthropicMessages.reduce((sum, m) => {
     if (typeof m.content === 'string') return sum + m.content.length;
     if (Array.isArray(m.content)) return sum + m.content.reduce((s, c) => s + (c.text?.length || 0), 0);
     return sum;
   }, 0);
-  console.log(`[ai-review] sending ~${totalInputChars} chars (~${Math.ceil(totalInputChars / 4)} tokens) to Claude`);
+  console.log(`[ai-review] sending ~${totalInputChars} chars (~${Math.ceil(totalInputChars / 4)} tokens) to AI proxy`);
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 32768,
-    messages: anthropicMessages,
-  });
-
-  if (response.usage) {
-    console.log(`[ai-review] Claude response: ${response.usage.input_tokens} input tokens, ${response.usage.output_tokens} output tokens, stop_reason=${response.stop_reason}`);
-  } else {
-    console.log(`[ai-review] Claude response: usage unavailable, stop_reason=${response.stop_reason}`);
+  let response;
+  try {
+    response = await fetch(`${creds.serverWwwUrl}/api/inspections/ai-analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${creds.plaintextKey}`,
+      },
+      body: JSON.stringify({ messages: anthropicMessages }),
+    });
+  } catch (networkErr) {
+    const e = new Error(`Network error contacting AI proxy: ${networkErr.message}`);
+    e.code = 'NETWORK_ERROR';
+    throw e;
   }
-  if (response.stop_reason === 'max_tokens') {
-    console.warn('[ai-review] WARNING: response hit max_tokens cap, output may be truncated');
+
+  if (response.status === 401) {
+    // Mirror of the send-to-crm 401 handler: server says this key is no
+    // longer valid → wipe disk creds + prompt re-login. The renderer's
+    // onAuthExpired callback does NOT reset in-memory inspection state, so
+    // the user can re-login and re-run analysis with their work intact.
+    console.log('[auth] 401 detected during ai-analyze — clearing credentials, prompting re-login');
+    await credentialStore.clearCredentials();
+    mainWindow?.webContents.send('auth-expired');
+    const e = new Error('Auth expired');
+    e.code = 'AUTH_EXPIRED';
+    throw e;
   }
 
-  return response.content[0].text;
+  if (!response.ok) {
+    // 4xx (other than 401) and 5xx: proxy returns {error, anthropicStatus,
+    // anthropicMessage}. anthropicMessage is the most actionable detail when
+    // present (e.g., content-policy reject); fall back to error / status.
+    const errBody = await response.json().catch(() => ({}));
+    const detail = errBody.anthropicMessage || errBody.error || `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+
+  const data = await response.json();
+  console.log('[ai-review] AI proxy response received');
+  return data.text;
 }
 
 /**
@@ -550,6 +596,13 @@ ipcMain.handle('analyze-inspections', async (event, { newInspection, previousIns
         },
       };
     } catch (v3Error) {
+      // Auth errors short-circuit: V2 would fail identically through the same
+      // proxy, so a fallback would just waste another doomed call. Surface
+      // the typed code; the renderer's auth-expired handler is already routing
+      // to the login screen, so no generic alert is needed.
+      if (v3Error.code === 'AUTH_EXPIRED' || v3Error.code === 'NOT_AUTHENTICATED') {
+        return { success: false, error: v3Error.code };
+      }
       // ALWAYS log this — not gated on debug.
       console.warn('[ai-review] V3 emission failed — falling back to V2:', v3Error.message);
       // fall through to V2 path
@@ -567,6 +620,11 @@ ipcMain.handle('analyze-inspections', async (event, { newInspection, previousIns
     result.format = 'v2'; // explicit so send-to-crm can branch
     return { success: true, result };
   } catch (error) {
+    // Surface typed auth codes so the renderer can suppress the generic
+    // alert (auth-expired event already routed it to the login screen).
+    if (error.code === 'AUTH_EXPIRED' || error.code === 'NOT_AUTHENTICATED') {
+      return { success: false, error: error.code };
+    }
     return { success: false, error: error.message };
   }
 });
