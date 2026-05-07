@@ -56,12 +56,20 @@ const crypto = require('crypto');
  */
 
 /**
+ * @typedef {Object} UtilityStatus
+ * @property {'on'|'off'|'unknown'} water
+ * @property {'on'|'off'|'unknown'} power
+ * @property {'on'|'off'|'unknown'} gas
+ */
+
+/**
  * @typedef {Object} V3IssuesBlob
  * @property {{cleaning: V3IssueGroup[], make_ready: V3IssueGroup[], exterior: V3IssueGroup[]}} buckets
  * @property {V3Issue[]} manualIssues
  * @property {number} totalIssues
  * @property {number} totalSkipped
  * @property {number} totalUnreviewed
+ * @property {UtilityStatus} [utilityStatus]
  */
 
 /**
@@ -271,9 +279,12 @@ function recomputeTotals(blob) {
  * @param {RawAiIssue[]} rawAiIssues
  * @param {boolean} isComparisonMode
  * @param {number} threshold
+ * @param {UtilityStatus} [utilityStatus] - Mission 8: optional property-level
+ *   utility state extracted by the AI from the inspection cover page. Carried
+ *   through to the saved blob unchanged when present; omitted when absent.
  * @returns {V3IssuesBlob}
  */
-function assembleV3Blob(rawAiIssues, isComparisonMode, threshold) {
+function assembleV3Blob(rawAiIssues, isComparisonMode, threshold, utilityStatus) {
   if (!Array.isArray(rawAiIssues)) {
     throw new Error('assembleV3Blob: expected an array of AI issues');
   }
@@ -393,6 +404,18 @@ function assembleV3Blob(rawAiIssues, isComparisonMode, threshold) {
     totalSkipped: 0,
     totalUnreviewed: 0,
   };
+  // Mission 8: attach AI-emitted utility status when present. Light validation —
+  // accept the object only if it has the expected three keys with valid enum
+  // values. Anything malformed is dropped silently (banner stays hidden).
+  if (utilityStatus && typeof utilityStatus === 'object') {
+    const validStates = ['on', 'off', 'unknown'];
+    const { water, power, gas } = utilityStatus;
+    if (validStates.includes(water) && validStates.includes(power) && validStates.includes(gas)) {
+      blob.utilityStatus = { water, power, gas };
+    } else {
+      console.warn('[ai-review] dropped malformed utilityStatus:', utilityStatus);
+    }
+  }
   recomputeTotals(blob);
   return blob;
 }

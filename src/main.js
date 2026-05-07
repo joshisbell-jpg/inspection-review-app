@@ -567,7 +567,7 @@ ipcMain.handle('analyze-inspections', async (event, { newInspection, previousIns
         throw new Error('V3 prompt returned non-array issues');
       }
 
-      const v3Blob = assembleV3Blob(parsedAi.issues, isComparisonMode, threshold);
+      const v3Blob = assembleV3Blob(parsedAi.issues, isComparisonMode, threshold, parsedAi.utilityStatus);
       const displayShape = transformV3ToV2ForDisplay(
         v3Blob,
         parsedAi.overall_condition,
@@ -1498,13 +1498,41 @@ IMPORTANT:
     content.push({ type: 'text', text: '\n\n## NO MOVE-IN INSPECTION PROVIDED\nAnalyze only the current condition.\n' });
   }
 
+  // Mission 8: utility status extraction directive — same wording as V3, kept
+  // in lockstep so V2 + V3 banners surface the same property-level signal.
+  const utilityStatusInstructions = `
+ALSO extract property-level utility status from the inspection PDF's COVER PAGE
+or property-metadata section. Output as a top-level "utilityStatus" object with
+the shape shown in the schema below.
+
+Use 'on' when the cover page indicates the utility is active (check marks, "water
+on", no "no service" notes, fixtures throughout the inspection appear functional).
+Use 'off' when the cover page or multiple fixtures throughout consistently indicate
+the utility is unavailable (e.g., "no water service to property", 6+ fixtures all
+reporting "no water"). Use 'unknown' when the cover page is silent AND the
+inspection findings don't provide a clear systemic signal — when in doubt,
+'unknown' is safer than a false 'off'.
+
+Do NOT use individual defect mentions to infer property-level utility status.
+"Leaking water heater", "kitchen faucet drips", "rusty water heater", "outlet
+near breaker" are LOCALIZED fixture issues, not utility-service status. The
+signal you're looking for is property-wide, not fixture-level. A property with
+50+ defect-level water mentions can still have water service ON.
+`;
+
   content.push({
     type: 'text',
     text: isComparison
       ? `\n\nReturn your findings as JSON. List ALL issues — do not skip minor ones:
+${utilityStatusInstructions}
 {
   "overall_condition": "excellent|good|fair|poor",
   "summary": "2-3 sentence overview of what you found",
+  "utilityStatus": {
+    "water": "on",
+    "power": "on",
+    "gas": "unknown"
+  },
   "issues": [
     {
       "room": "Kitchen",
@@ -1519,9 +1547,15 @@ IMPORTANT:
   ]
 }`
       : `\n\nReturn your findings as JSON. List ALL issues — do not skip minor ones:
+${utilityStatusInstructions}
 {
   "overall_condition": "excellent|good|fair|poor",
   "summary": "2-3 sentence overview of what you found",
+  "utilityStatus": {
+    "water": "on",
+    "power": "on",
+    "gas": "unknown"
+  },
   "issues": [
     {
       "room": "Kitchen",
@@ -1607,11 +1641,46 @@ When the screenshots show a page number (e.g., "Page 3 of 149"), include the
 integer in \`pageReferences\` (e.g., \`[3]\`). If multiple pages document the
 same issue, include all (\`[3, 4]\`). If no page number is visible, emit \`[]\`.
 
+## Property utility status (extract from cover page, NOT from defect descriptions)
+
+ALSO extract property-level utility status from the inspection PDF's COVER PAGE
+or property-metadata section. Output as a top-level \`utilityStatus\` object:
+
+  "utilityStatus": {
+    "water": "on" | "off" | "unknown",
+    "power": "on" | "off" | "unknown",
+    "gas": "on" | "off" | "unknown"
+  }
+
+Use 'on' when the cover page indicates the utility is active (check marks next
+to the utility name, "water on", absence of any "no service" notes, AND
+fixtures throughout the inspection report appear functional).
+
+Use 'off' when the cover page or multiple fixtures throughout the inspection
+report consistently indicate the utility is unavailable (e.g., "no water
+service to property", 6+ fixtures all reporting "no water", similar systemic
+patterns for power/gas).
+
+Use 'unknown' when the cover page does not indicate utility status AND the
+inspection findings don't provide a clear systemic signal either way. When in
+doubt, use 'unknown' — false 'off' calls are worse than missing data.
+
+Do NOT use individual defect mentions to infer property-level utility status.
+"Leaking water heater", "kitchen faucet drips", "rusty water heater", "outlet
+near breaker" are all LOCALIZED fixture issues, not utility-service status.
+A property with 50+ defect-level water mentions can still have water service
+ON. The signal you're looking for is property-wide, not fixture-level.
+
 ## Output schema (strict — return ONLY this JSON, no prose, no code fences)
 
 {
   "overall_condition": "excellent|good|fair|poor",
   "summary": "2-3 sentence overview of what you found",
+  "utilityStatus": {
+    "water": "on",
+    "power": "on",
+    "gas": "unknown"
+  },
   "issues": [
     {
       "room": "Kitchen",
