@@ -1,155 +1,96 @@
-# Inspection Review App
+# Inspection Review
 
-A desktop application for property managers to batch-review inspections using AI.
+Desktop app for KeepSimpleCRM property managers to review property
+inspections — uploads move-out PDFs (with optional move-in PDF for
+comparison) from AppFolio or zInspector, runs AI-assisted issue
+detection through the KeepSimpleCRM server, lets the reviewer assign
+liability per issue, and saves the finalized review back to the CRM.
 
-## What It Does
+> **This is internal tooling for Isbell Rentals.** Source is public
+> for transparency and to enable installer downloads. No reuse rights
+> are granted (no LICENSE file by design — default copyright applies).
 
-1. **Paste inspection links** from AppFolio or Zinspector (5-10 at a time)
-2. **Automatically extracts** photos and data from each inspection
-3. **AI compares** move-out vs move-in conditions
-4. **Generates** findings report with liability assignments
-5. **Drafts emails** for property owners and tenants
+---
 
-## Setup
+## For inspectors
 
-### Prerequisites
+Don't clone this repo. Visit
+[keepsimplecrm.com/ai-review/electron](https://www.keepsimplecrm.com/ai-review/electron)
+for the installer download and setup instructions.
 
-- Node.js 18+ installed ([download](https://nodejs.org))
-- Chrome browser installed
-- Anthropic API key ([get one](https://console.anthropic.com))
+## For developers
 
-### Installation
+### Stack
+
+- Electron 29 (desktop shell, main + renderer processes)
+- pdf-parse (PDF text extraction — current AI-input path)
+- Playwright (legacy AppFolio/zInspector scraping path; bundled
+  Chromium kept for the older URL-based flow)
+- Native `fetch` against KeepSimpleCRM at `https://www.keepsimplecrm.com`
+  for all authenticated calls (login, AI analysis proxy, save-to-CRM).
+  No Anthropic SDK on the client; no API keys shipped with the
+  installer.
+
+### Local dev
 
 ```bash
-# Clone or download this folder
+git clone https://github.com/joshisbell-jpg/inspection-review-app.git
 cd inspection-review-app
-
-# Install dependencies
 npm install
-
-# Install Playwright browsers (first time only)
-npx playwright install chromium
-
-# Set your API key
-export ANTHROPIC_API_KEY="your-key-here"
-
-# Run the app
 npm start
 ```
 
-### Building for Distribution
+The app launches against `https://www.keepsimplecrm.com` by default.
+Optional environment variables (set in `.env` next to `package.json`):
 
-To create standalone apps for Mac and Windows:
+- `CRM_LOGIN_URL` — override the login endpoint (e.g. for local CRM
+  dev against `http://localhost:3000`).
+- `AI_REVIEW_FORMAT` — `v3` (default) or `v2` for the legacy flat
+  prompt.
+- `AI_REVIEW_CONFIDENCE_THRESHOLD` — float, default `0.7`.
+- `AI_REVIEW_DEBUG` — `true` for verbose ai-review logging.
+
+### Build (Windows installer)
 
 ```bash
-# Build for Mac
-npm run build:mac
-
-# Build for Windows  
 npm run build:win
-
-# Build for both
-npm run build
 ```
 
-Built apps will be in the `dist/` folder.
+Produces `dist/Inspection Review Setup <version>.exe` (~280 MB,
+mostly Playwright's bundled Chromium). Mac build: `npm run build:mac`.
 
-## Usage
+### Architecture pointers
 
-### First Time Setup
+- `src/main.js` — Electron main process. IPC handlers for
+  `electron-login`, `electron-logout`, `auth-state`,
+  `analyze-inspections`, `send-to-crm`, `fetch-inspection`,
+  `open-external-url`. `callClaude` posts `{messages}` to the CRM
+  proxy at `/api/inspections/ai-analyze`.
+- `src/credential-store.js` — `safeStorage` (DPAPI on Windows) over
+  `credentials.bin` in `%APPDATA%\Inspection Review\`. Schema-versioned;
+  plaintext fallback when `safeStorage.isEncryptionAvailable()` is
+  false. `preferences.json` (plaintext) caches `lastEmail` for the
+  login screen prefill.
+- `src/preload.js` — exposes `window.api.*` to the renderer.
+- `src/index.html` — renderer (login screen, main UI, results view).
+- `src/review-v3.js` — V3 issue-bucketing helpers (Cleaning,
+  Make-Ready, Exterior) for the categorized prompt.
 
-1. Open the app
-2. A Chrome window will open — **log into AppFolio and Zinspector**
-3. Your login session will be saved for future use
+### Releases
 
-### Processing Inspections
+Tagged versions on `master`. Installer downloads on the
+[releases page](https://github.com/joshisbell-jpg/inspection-review-app/releases).
+The CRM page links to `/releases/latest` so inspectors always land on
+the newest published version.
 
-1. Copy inspection links from AppFolio/Zinspector
-2. Paste them into the app (one per line)
-3. First link = move-out inspection
-4. Additional links = previous inspections to compare against
-5. Click "Process Inspections"
-6. Wait for AI analysis (1-2 minutes)
-7. Review results, copy emails, export JSON
+### Server-side counterparts
 
-### Adding Context (Optional)
+Authentication, AI analysis, and review persistence are all owned by
+the [KeepSimpleCRM](https://www.keepsimplecrm.com) backend (private
+repo). Endpoints this app calls:
 
-Click "+ Add property context" to enter:
-- Tenant name
-- Security deposit amount
-- Lease start/end dates
-
-This helps the AI make more accurate assessments.
-
-## How It Works
-
-### Browser Automation
-
-The app uses Playwright to open a browser with your existing login session. This means:
-- No API keys for AppFolio/Zinspector needed
-- Uses your existing permissions
-- Photos are streamed directly, no giant downloads
-- Your credentials never leave your computer
-
-### AI Analysis
-
-The app sends inspection photos to Claude (Anthropic's AI) which:
-- Identifies issues in each photo
-- Compares move-out condition to move-in
-- Determines liability (tenant vs normal wear vs maintenance)
-- Estimates repair costs
-- Generates email drafts
-
-### Privacy
-
-- All processing happens locally or via Anthropic's API
-- No data is stored on external servers
-- Your AppFolio/Zinspector credentials are never transmitted
-
-## Troubleshooting
-
-### "Browser not initialized"
-- Make sure Chrome is installed
-- Try running `npx playwright install chromium` again
-
-### "Failed to fetch inspection"
-- Check that you're logged into AppFolio/Zinspector
-- The URL might have changed or be invalid
-- Try opening the URL in the browser window that appears
-
-### "Analysis failed"
-- Check your ANTHROPIC_API_KEY is set correctly
-- You may have hit rate limits — wait a few minutes
-
-### Photos not extracting
-- The app looks for common CSS selectors
-- If AppFolio/Zinspector changed their layout, the selectors may need updating
-- Check `src/main.js` → `extractAppFolioData()` and `extractZinspectorData()`
-
-## Customization
-
-### Adjusting AI Prompts
-
-Edit `src/main.js` → `buildComparisonMessages()` to change:
-- What counts as normal wear vs tenant damage
-- Cost estimation logic
-- Output format
-
-### Adding New Platforms
-
-To support a new inspection platform:
-1. Add detection in `detectPlatform()`
-2. Create an extraction function like `extractAppFolioData()`
-3. Map the CSS selectors to find photos and property info
-
-## Support
-
-This tool was built with Claude Code. To modify or extend it:
-1. Open the project folder in your terminal
-2. Run `claude` to start Claude Code
-3. Describe what you want to change
-
-Example prompts:
-- "Add support for RentManager inspections"
-- "Change the email format to include more detail"
-- "Add a dark mode toggle"
+- `POST /api/auth/electron-login` — credential auth, returns per-user
+  API key + organization metadata.
+- `POST /api/auth/electron-logout` — Bearer-authed key revoke.
+- `POST /api/inspections/ai-analyze` — Bearer-authed Anthropic proxy.
+- `POST /api/inspections/ai-review` — Bearer-authed save-to-CRM.
