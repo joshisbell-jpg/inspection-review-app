@@ -1513,6 +1513,18 @@ reporting "no water"). Use 'unknown' when the cover page is silent AND the
 inspection findings don't provide a clear systemic signal — when in doubt,
 'unknown' is safer than a false 'off'.
 
+IMPORTANT: a single fixture's "no water" note is NOT sufficient to call water
+'off' at the property level. Single-fixture issues are localized (a broken sink,
+an unhooked toilet) and may be unrelated to property-wide utility service. Use
+'off' ONLY when EITHER:
+  (a) the cover page or property metadata section EXPLICITLY indicates the
+      utility is shut off, OR
+  (b) 6+ separate fixtures throughout the inspection report consistently show
+      the same utility unavailable (e.g., 6+ different fixtures all reporting
+      "no water", not just one).
+If only 1-5 fixtures report a utility issue, that's localized fixture failure —
+return 'unknown' for that utility, NOT 'off'.
+
 Do NOT use individual defect mentions to infer property-level utility status.
 "Leaking water heater", "kitchen faucet drips", "rusty water heater", "outlet
 near breaker" are LOCALIZED fixture issues, not utility-service status. The
@@ -1660,6 +1672,18 @@ Use 'off' when the cover page or multiple fixtures throughout the inspection
 report consistently indicate the utility is unavailable (e.g., "no water
 service to property", 6+ fixtures all reporting "no water", similar systemic
 patterns for power/gas).
+
+IMPORTANT: a single fixture's "no water" note is NOT sufficient to call water
+'off' at the property level. Single-fixture issues are localized (a broken
+sink, an unhooked toilet) and may be unrelated to property-wide utility
+service. Use 'off' ONLY when EITHER:
+  (a) the cover page or property metadata section EXPLICITLY indicates the
+      utility is shut off, OR
+  (b) 6+ separate fixtures throughout the inspection report consistently show
+      the same utility unavailable (e.g., 6+ different fixtures all reporting
+      "no water", not just one).
+If only 1-5 fixtures report a utility issue, that's localized fixture failure —
+return 'unknown' for that utility, NOT 'off'.
 
 Use 'unknown' when the cover page does not indicate utility status AND the
 inspection findings don't provide a clear systemic signal either way. When in
