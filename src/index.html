@@ -1076,11 +1076,12 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       issuesHelp.textContent = 'Review each issue and assign responsibility using the buttons.';
       resultsContainer.appendChild(issuesHelp);
 
-      // Issues list
-      const issuesList = document.createElement('ul');
-      issuesList.className = 'issue-list';
-
-      issues.forEach((issue, idx) => {
+      // Issues rendering — Mission C: V3 groups by bucket+groupLabel, V2 stays flat.
+      // Per-issue rendering body extracted into renderIssueLi so both paths reuse
+      // the same card UI byte-for-byte (approval model unchanged). Numbering stays
+      // global 1..N; reviewDecisions[idx] flat-index keying is load-bearing for
+      // save-to-CRM (decisions map back to V3Issues via _v3Id at save time).
+      function renderIssueLi(issue, idx) {
         const li = document.createElement('li');
         li.className = 'issue-item';
         li.id = 'issue-' + idx;
@@ -1183,10 +1184,92 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
         }
 
         li.appendChild(topRow);
-        issuesList.appendChild(li);
-      });
+        return li;
+      }
 
-      resultsContainer.appendChild(issuesList);
+      // V3 grouped rendering: cleaning → make_ready → exterior → manualIssues.
+      // Mirrors KeepSimpleCRM Mission 3 Phase 4's V3 display shape (bucket cards
+      // with group sub-sections within). Empty buckets skipped. Manual bucket
+      // titled "Other Issues", hidden when empty. Group sub-headers show
+      // groupLabel + per-group count. Per-issue rendering reuses renderIssueLi
+      // so the approval model + save-to-CRM contract are byte-identical to V2.
+      function renderV3IssuesGrouped(container, blob, flatDisplayIssues) {
+        // Build _v3Id → flatIndex map. The flat array is in cleaning →
+        // make_ready → exterior → manual order (set by transformV3ToV2ForDisplay
+        // in review-v3.js), but this lookup is order-independent for safety.
+        const idxById = new Map();
+        flatDisplayIssues.forEach((di, i) => {
+          if (di && di._v3Id) idxById.set(di._v3Id, i);
+        });
+
+        const bucketDefs = [
+          { key: 'cleaning', title: 'Cleaning' },
+          { key: 'make_ready', title: 'Make-Ready' },
+          { key: 'exterior', title: 'Exterior' },
+        ];
+
+        for (const def of bucketDefs) {
+          const groups = (blob.buckets && blob.buckets[def.key]) || [];
+          const issueCount = groups.reduce((s, g) => s + ((g.issues || []).length), 0);
+          if (issueCount === 0) continue;
+
+          const bucketHeader = document.createElement('h3');
+          bucketHeader.style.cssText = 'font-size:16px;font-weight:600;margin-top:24px;margin-bottom:8px';
+          bucketHeader.textContent = def.title + ' (' + issueCount + ')';
+          container.appendChild(bucketHeader);
+
+          for (const group of groups) {
+            const groupIssues = group.issues || [];
+            if (groupIssues.length === 0) continue;
+
+            const groupHeader = document.createElement('h4');
+            groupHeader.style.cssText = 'font-size:14px;font-weight:500;color:var(--text-secondary);margin-top:12px;margin-bottom:6px';
+            groupHeader.textContent = (group.groupLabel || 'Untitled group') + ' (' + groupIssues.length + ')';
+            container.appendChild(groupHeader);
+
+            const list = document.createElement('ul');
+            list.className = 'issue-list';
+            for (const v3issue of groupIssues) {
+              const flatIdx = idxById.get(v3issue.id);
+              if (flatIdx === undefined) {
+                console.warn('[v3-render] v3issue id', v3issue.id, 'has no flatDisplayIssues entry — skipped');
+                continue;
+              }
+              list.appendChild(renderIssueLi(flatDisplayIssues[flatIdx], flatIdx));
+            }
+            container.appendChild(list);
+          }
+        }
+
+        const manualIssues = blob.manualIssues || [];
+        if (manualIssues.length > 0) {
+          const bucketHeader = document.createElement('h3');
+          bucketHeader.style.cssText = 'font-size:16px;font-weight:600;margin-top:24px;margin-bottom:8px';
+          bucketHeader.textContent = 'Other Issues (' + manualIssues.length + ')';
+          container.appendChild(bucketHeader);
+
+          const list = document.createElement('ul');
+          list.className = 'issue-list';
+          for (const v3issue of manualIssues) {
+            const flatIdx = idxById.get(v3issue.id);
+            if (flatIdx === undefined) continue;
+            list.appendChild(renderIssueLi(flatDisplayIssues[flatIdx], flatIdx));
+          }
+          container.appendChild(list);
+        }
+      }
+
+      // Branch: V3 groups by bucket+groupLabel; V2 stays flat.
+      if (results.format === 'v3' && results.issues && results.issues.buckets) {
+        renderV3IssuesGrouped(resultsContainer, results.issues, displayIssues);
+      } else {
+        const issuesList = document.createElement('ul');
+        issuesList.className = 'issue-list';
+        issues.forEach((issue, idx) => {
+          issuesList.appendChild(renderIssueLi(issue, idx));
+        });
+        resultsContainer.appendChild(issuesList);
+      }
 
       // Review summary (sticky at bottom)
       const summaryDiv = document.createElement('div');
