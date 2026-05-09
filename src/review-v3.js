@@ -13,6 +13,16 @@
 
 const crypto = require('crypto');
 
+// V4 keyword tables + classifier (Mission 9 Phase B.1).
+// Source of truth: keepsimplecrm/src/lib/inspections/migrate-v3-to-v4.ts.
+const {
+  classifyIssueByKeywords,
+  CARPET_SUBSECTION_REGEX,
+  LAWN_SUBSECTION_REGEX,
+  LAWN_SUBSECTION_PRIORITY,
+  BUCKET_PRIORITY_ORDER,
+} = require('./keyword-tables');
+
 // ============================================================================
 // JSDoc types (mirror keepsimplecrm review-types.ts exactly)
 // ============================================================================
@@ -564,6 +574,426 @@ function applyReviewerDecisions(v3Blob, reviewerDecisions, displayedIssues) {
   return { blob: cloned, mappedCount, unmappedCount };
 }
 
+// ============================================================================
+// V4 assembly (Mission 9 Phase B.1 — 8-bucket multi-approval restructure)
+// ============================================================================
+//
+// Mirrors keepsimplecrm/src/lib/inspections/review-types.ts §V4 types.
+// AI emits flat issues[] with `bucket` + `subsectionKey` per issue.
+// assembleV4Blob normalizes, runs deterministic fallback when AI confidence
+// is low (<0.7) or bucket invalid, groups by (bucket, subsection?, groupKey),
+// then builds V4Bucket variants per approval mode (single / per_item / mixed)
+// per the locked design in tasks/mission-9-handoff.md Section 3.
+
+// Display-ordered bucket keys (matches handoff Section 3.1 visual order).
+const V4_DISPLAY_ORDER = [
+  'cleaning',
+  'carpet',
+  'light_bulbs',
+  'pest_control',
+  'make_ready',
+  'exterior_make_ready',
+  'exterior_lawn_care',
+  'other',
+];
+
+const V4_BUCKET_LABELS = {
+  cleaning: 'Cleaning',
+  carpet: 'Carpet',
+  light_bulbs: 'Light Bulbs',
+  pest_control: 'Pest Control',
+  make_ready: 'Make-Ready',
+  exterior_make_ready: 'Exterior — Make-Ready',
+  exterior_lawn_care: 'Exterior — Lawn Care',
+  other: 'Other',
+};
+
+// Lawn-care subsections rendered in this order (distinct from
+// LAWN_SUBSECTION_PRIORITY, which controls keyword-classifier dispatch).
+const V4_LAWN_DISPLAY_ORDER = ['grass', 'bushes', 'trees', 'flowerbeds', 'other_lawn'];
+const V4_LAWN_SUBSECTION_LABELS = {
+  grass: 'Grass',
+  bushes: 'Bushes',
+  trees: 'Trees',
+  flowerbeds: 'Flower Beds',
+  other_lawn: 'Other Lawn',
+};
+
+const V4_SINGLE_APPROVAL_BUCKETS = new Set(['cleaning', 'light_bulbs', 'pest_control']);
+const V4_PER_ITEM_BUCKETS = new Set(['make_ready', 'exterior_make_ready', 'other']);
+// 'carpet' + 'exterior_lawn_care' use mixed approval (handled below).
+
+const V4_VALID_BUCKETS = new Set(BUCKET_PRIORITY_ORDER);
+const V4_VALID_SEVERITIES = new Set(['minor', 'moderate', 'major']);
+const V4_VALID_UTILITY_STATES = ['on', 'off', 'unknown'];
+const V4_BUCKET_CONFIDENCE_THRESHOLD = 0.7;
+
+/**
+ * Assemble the AI's flat V4 response into a fully-populated V4IssuesBlob.
+ *
+ * Per-issue normalization:
+ *   1. Validate severity / pageReferences / room / area / description.
+ *   2. Resolve bucket: AI's choice if valid AND bucketConfidence ≥ 0.7;
+ *      otherwise run classifyIssueByKeywords against `${room} ${area} ${description}`.
+ *      Attribute via bucketAssignedBy: 'ai' | 'deterministic-fallback'.
+ *   3. Resolve subsectionKey for carpet (cleaning|damage) and exterior_lawn_care
+ *      (grass|bushes|trees|flowerbeds|other_lawn). AI value if valid, else
+ *      regex-infer; lawn defaults to 'other_lawn' when no regex matches.
+ *   4. Default liability='unassigned' / liabilityDefaultedBy='auto' on every
+ *      V4Issue. V4Issue carries NO `bucket` field (structural location in
+ *      the assembled blob is source of truth — see review-types.ts §V4).
+ *
+ * Bucket assembly:
+ *   - cleaning / light_bulbs / pest_control → V4SingleApprovalBucket
+ *     (flat issues[] sharing one V4BucketDecision)
+ *   - make_ready / exterior_make_ready / other → V4PerItemBucket
+ *     (groups[] of V4IssueGroup, each issue carrying its own liability)
+ *   - carpet → V4MixedApprovalBucket with two subsections:
+ *       cleaning (single, flat issues[])
+ *       damage (per_item, groups[])
+ *   - exterior_lawn_care → V4MixedApprovalBucket with up to 5 single-approval
+ *     subsections in display order (grass, bushes, trees, flowerbeds, other_lawn)
+ *   - Empty buckets / subsections are omitted from the output.
+ *
+ * Throws on structural problems (invalid formatVersion, non-array issues,
+ * missing description, etc.) so the caller can soft-fall-back to V3.
+ *
+ * @param {Object} rawAIResponse - parsed AI JSON (formatVersion='v4' shape)
+ * @returns {V4IssuesBlob}
+ */
+function assembleV4Blob(rawAIResponse) {
+  // Step 1 — validate top-level shape.
+  if (!rawAIResponse || typeof rawAIResponse !== 'object') {
+    throw new Error('assembleV4Blob: rawAIResponse must be an object');
+  }
+  if (rawAIResponse.formatVersion !== 'v4') {
+    throw new Error(
+      `assembleV4Blob: expected formatVersion 'v4', got ${rawAIResponse.formatVersion}`,
+    );
+  }
+  if (!Array.isArray(rawAIResponse.issues)) {
+    throw new Error('assembleV4Blob: rawAIResponse.issues must be an array');
+  }
+
+  // Step 2 — per-issue normalization. Output each item as
+  // { v4Issue, bucketKey, subsectionKey, groupKey, groupLabel } so Step 4 can
+  // dispatch on bucket/subsection without re-deriving these.
+  const processed = rawAIResponse.issues.map((rawIssue, idx) => {
+    if (!rawIssue || typeof rawIssue !== 'object') {
+      throw new Error(`assembleV4Blob: issue at index ${idx} is not an object`);
+    }
+
+    const room = String(rawIssue.room || 'Unknown').trim();
+    const area = String(rawIssue.area || '').trim();
+    const description = String(rawIssue.description || '').trim();
+    if (!description) {
+      throw new Error(`assembleV4Blob: issue at index ${idx} is missing description`);
+    }
+
+    // Pre-computed classifier input — reused for bucket resolution AND
+    // subsection inference. Matches Phase B.0 keyword-research contract:
+    // "(groupLabel + description + room + area).toLowerCase()" — all signals
+    // available to the regex tables, not just description.
+    //
+    // NOTE: Phase B.0 contract also specifies groupLabel as part of the
+    // classifier text. Omitted here because groupLabel is derived later
+    // in this same normalization block. AI-emitted issues encode strong
+    // signals in description/area; groupLabel rarely adds routing
+    // information that isn't already in the other fields. If STOP GATE 2
+    // surfaces a misroute traceable to a groupLabel-only signal, reorder
+    // normalization to resolve groupLabel before classifierText.
+    const classifierText = `${room} ${area} ${description}`.toLowerCase();
+
+    let severity = String(rawIssue.severity || '').toLowerCase();
+    if (!V4_VALID_SEVERITIES.has(severity)) severity = 'minor';
+
+    const pageReferences = Array.isArray(rawIssue.pageReferences)
+      ? rawIssue.pageReferences.filter((n) => Number.isFinite(Number(n))).map(Number)
+      : [];
+
+    const isNewSinceMoveIn = rawIssue.isNewSinceMoveIn !== false;
+    const moveInNote = rawIssue.moveInNote ? String(rawIssue.moveInNote) : undefined;
+
+    // Bucket resolution: AI-first, fallback when invalid or low-confidence.
+    const aiBucket = String(rawIssue.bucket || '').toLowerCase();
+    const aiBucketIsValid = V4_VALID_BUCKETS.has(aiBucket);
+    const rawConfidence = Number(rawIssue.bucketConfidence);
+    const bucketConfidence = Number.isFinite(rawConfidence)
+      ? Math.max(0, Math.min(1, rawConfidence))
+      : 0;
+
+    let bucketKey;
+    let bucketAssignedBy;
+    if (aiBucketIsValid && bucketConfidence >= V4_BUCKET_CONFIDENCE_THRESHOLD) {
+      bucketKey = aiBucket;
+      bucketAssignedBy = 'ai';
+    } else {
+      const classifierResult = classifyIssueByKeywords(classifierText);
+      if (classifierResult) {
+        bucketKey = classifierResult.bucket;
+        bucketAssignedBy =
+          aiBucketIsValid && classifierResult.bucket === aiBucket
+            ? 'ai'
+            : 'deterministic-fallback';
+      } else {
+        // Classifier returned null → preserve AI bucket if valid, else 'other'.
+        bucketKey = aiBucketIsValid ? aiBucket : 'other';
+        bucketAssignedBy = aiBucketIsValid ? 'ai' : 'deterministic-fallback';
+      }
+    }
+
+    // Subsection resolution for the two mixed-approval buckets.
+    let subsectionKey = null;
+    if (bucketKey === 'carpet') {
+      const aiSubsection = String(rawIssue.subsectionKey || '').toLowerCase();
+      if (aiSubsection === 'cleaning' || aiSubsection === 'damage') {
+        subsectionKey = aiSubsection;
+      } else {
+        subsectionKey = CARPET_SUBSECTION_REGEX.damage.test(classifierText)
+          ? 'damage'
+          : 'cleaning';
+      }
+    } else if (bucketKey === 'exterior_lawn_care') {
+      const aiSubsection = String(rawIssue.subsectionKey || '').toLowerCase();
+      if (LAWN_SUBSECTION_PRIORITY.includes(aiSubsection)) {
+        subsectionKey = aiSubsection;
+      } else {
+        let inferred = 'other_lawn';
+        for (const sub of LAWN_SUBSECTION_PRIORITY) {
+          if (LAWN_SUBSECTION_REGEX[sub].test(classifierText)) {
+            inferred = sub;
+            break;
+          }
+        }
+        subsectionKey = inferred;
+      }
+    }
+
+    // groupKey normalization (reuse V3 helper for consistency).
+    let groupKey = normalizeGroupKey(rawIssue.groupKey);
+    if (!groupKey) {
+      groupKey = normalizeGroupKey(description.split(/[.,;:]/)[0].slice(0, 60))
+        || `issue-${idx}`;
+    }
+    const groupLabel = String(rawIssue.groupLabel || description.slice(0, 80)).trim();
+
+    /** @type {V4Issue} */
+    const v4Issue = {
+      id: crypto.randomUUID(),
+      groupId: '', // resolved during grouping pass
+      room,
+      area,
+      description,
+      pageReferences,
+      severity,
+      isNewSinceMoveIn,
+      bucketConfidence,
+      bucketAssignedBy,
+      liability: 'unassigned',
+      liabilityDefaultedBy: 'auto',
+      isSkipped: false,
+      edits: [],
+    };
+    if (moveInNote) v4Issue.moveInNote = moveInNote;
+
+    return { v4Issue, bucketKey, subsectionKey, groupKey, groupLabel };
+  });
+
+  // Step 3 — group by (bucket, subsection?, groupKey). Each unique composite
+  // gets one V4IssueGroup with a shared groupId stamped onto every issue.
+  const groupIndex = new Map(); // compositeKey → V4IssueGroup
+  for (const item of processed) {
+    const compositeKey = item.subsectionKey
+      ? `${item.bucketKey}::${item.subsectionKey}::${item.groupKey}`
+      : `${item.bucketKey}::${item.groupKey}`;
+    let group = groupIndex.get(compositeKey);
+    if (!group) {
+      group = {
+        groupId: crypto.randomUUID(),
+        groupKey: item.groupKey,
+        groupLabel: item.groupLabel,
+        issues: [],
+      };
+      groupIndex.set(compositeKey, group);
+    }
+    item.v4Issue.groupId = group.groupId;
+    group.issues.push(item.v4Issue);
+  }
+
+  // Step 4 — build V4Bucket variants in display order, omitting empties.
+  const buckets = [];
+  for (const bucketKey of V4_DISPLAY_ORDER) {
+    const bucketProcessed = processed.filter((p) => p.bucketKey === bucketKey);
+    if (bucketProcessed.length === 0) continue;
+
+    const bucketLabel = V4_BUCKET_LABELS[bucketKey];
+
+    if (V4_SINGLE_APPROVAL_BUCKETS.has(bucketKey)) {
+      buckets.push({
+        bucketKey,
+        bucketLabel,
+        approvalMode: 'single',
+        decision: { liability: 'unassigned', liabilityDefaultedBy: 'auto' },
+        issues: bucketProcessed.map((p) => p.v4Issue),
+      });
+    } else if (V4_PER_ITEM_BUCKETS.has(bucketKey)) {
+      const seenGroupKeys = new Set();
+      const groups = [];
+      for (const p of bucketProcessed) {
+        if (seenGroupKeys.has(p.groupKey)) continue;
+        seenGroupKeys.add(p.groupKey);
+        const compositeKey = `${bucketKey}::${p.groupKey}`;
+        const group = groupIndex.get(compositeKey);
+        if (group) groups.push(group);
+      }
+      buckets.push({
+        bucketKey,
+        bucketLabel,
+        approvalMode: 'per_item',
+        groups,
+      });
+    } else if (bucketKey === 'carpet') {
+      const subsections = [];
+      // 'cleaning' subsection (single approval, flat issues).
+      const cleaningIssues = bucketProcessed
+        .filter((p) => p.subsectionKey === 'cleaning')
+        .map((p) => p.v4Issue);
+      if (cleaningIssues.length > 0) {
+        subsections.push({
+          approvalMode: 'single',
+          subsectionKey: 'cleaning',
+          subsectionLabel: 'Carpet Cleaning',
+          decision: { liability: 'unassigned', liabilityDefaultedBy: 'auto' },
+          issues: cleaningIssues,
+        });
+      }
+      // 'damage' subsection (per_item, grouped).
+      const damageProcessed = bucketProcessed.filter((p) => p.subsectionKey === 'damage');
+      if (damageProcessed.length > 0) {
+        const seenGroupKeys = new Set();
+        const groups = [];
+        for (const p of damageProcessed) {
+          if (seenGroupKeys.has(p.groupKey)) continue;
+          seenGroupKeys.add(p.groupKey);
+          const compositeKey = `${bucketKey}::damage::${p.groupKey}`;
+          const group = groupIndex.get(compositeKey);
+          if (group) groups.push(group);
+        }
+        subsections.push({
+          approvalMode: 'per_item',
+          subsectionKey: 'damage',
+          subsectionLabel: 'Carpet Damage',
+          groups,
+        });
+      }
+      if (subsections.length === 0) continue;
+      buckets.push({
+        bucketKey,
+        bucketLabel,
+        approvalMode: 'mixed',
+        subsections,
+      });
+    } else if (bucketKey === 'exterior_lawn_care') {
+      const subsections = [];
+      for (const sub of V4_LAWN_DISPLAY_ORDER) {
+        const subIssues = bucketProcessed
+          .filter((p) => p.subsectionKey === sub)
+          .map((p) => p.v4Issue);
+        if (subIssues.length === 0) continue;
+        subsections.push({
+          approvalMode: 'single',
+          subsectionKey: sub,
+          subsectionLabel: V4_LAWN_SUBSECTION_LABELS[sub],
+          decision: { liability: 'unassigned', liabilityDefaultedBy: 'auto' },
+          issues: subIssues,
+        });
+      }
+      if (subsections.length === 0) continue;
+      buckets.push({
+        bucketKey,
+        bucketLabel,
+        approvalMode: 'mixed',
+        subsections,
+      });
+    }
+  }
+
+  // Step 5 + 6 — compute totals across the assembled structure. Decision-point
+  // counting: 1 per single-approval bucket / single-approval subsection;
+  // N per per-item bucket / per-item subsection (N = item count). Item-level
+  // counting (totalIssues, totalSkipped) is independent of decision shape.
+  let totalIssues = 0;
+  let totalDecisions = 0;
+  let totalDecisionsMade = 0;
+  let totalSkipped = 0;
+
+  for (const bucket of buckets) {
+    if (bucket.approvalMode === 'single') {
+      totalIssues += bucket.issues.length;
+      totalDecisions += 1;
+      if (bucket.decision.liability !== 'unassigned') totalDecisionsMade += 1;
+      totalSkipped += bucket.issues.filter((i) => i.isSkipped).length;
+    } else if (bucket.approvalMode === 'per_item') {
+      for (const group of bucket.groups) {
+        totalIssues += group.issues.length;
+        totalDecisions += group.issues.length;
+        totalDecisionsMade += group.issues.filter(
+          (i) => i.liability !== 'unassigned',
+        ).length;
+        totalSkipped += group.issues.filter((i) => i.isSkipped).length;
+      }
+    } else if (bucket.approvalMode === 'mixed') {
+      for (const sub of bucket.subsections) {
+        if (sub.approvalMode === 'single') {
+          totalIssues += sub.issues.length;
+          totalDecisions += 1;
+          if (sub.decision.liability !== 'unassigned') totalDecisionsMade += 1;
+          totalSkipped += sub.issues.filter((i) => i.isSkipped).length;
+        } else if (sub.approvalMode === 'per_item') {
+          for (const group of sub.groups) {
+            totalIssues += group.issues.length;
+            totalDecisions += group.issues.length;
+            totalDecisionsMade += group.issues.filter(
+              (i) => i.liability !== 'unassigned',
+            ).length;
+            totalSkipped += group.issues.filter((i) => i.isSkipped).length;
+          }
+        }
+      }
+    }
+  }
+  const totalUnreviewed = totalDecisions - totalDecisionsMade;
+
+  // Step 7 — build top-level V4IssuesBlob.
+  /** @type {V4IssuesBlob} */
+  const v4Blob = {
+    formatVersion: 'v4',
+    buckets,
+    totalIssues,
+    totalDecisions,
+    totalDecisionsMade,
+    totalSkipped,
+    totalUnreviewed,
+  };
+
+  // Mission 8: utility status (optional, validated). Mirrors V3 shape check.
+  const utilityStatus = rawAIResponse.utilityStatus;
+  if (utilityStatus && typeof utilityStatus === 'object') {
+    const { water, power, gas } = utilityStatus;
+    if (
+      V4_VALID_UTILITY_STATES.includes(water)
+      && V4_VALID_UTILITY_STATES.includes(power)
+      && V4_VALID_UTILITY_STATES.includes(gas)
+    ) {
+      v4Blob.utilityStatus = { water, power, gas };
+    } else {
+      console.warn('[ai-review] dropped malformed utilityStatus in V4 blob:', utilityStatus);
+    }
+  }
+
+  return v4Blob;
+}
+
 module.exports = {
   // Pure helpers (exported for tests + reuse in main.js telemetry)
   keywordBucketFor,
@@ -575,6 +1005,7 @@ module.exports = {
   assembleV3Blob,
   transformV3ToV2ForDisplay,
   applyReviewerDecisions,
+  assembleV4Blob,
   // Constants exposed for tests / debugging
   EXTERIOR_KEYWORDS,
   MAKE_READY_KEYWORDS,
