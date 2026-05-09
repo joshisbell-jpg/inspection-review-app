@@ -14,6 +14,7 @@ const {
   assembleV3Blob,
   transformV3ToV2ForDisplay,
   applyReviewerDecisions,
+  assembleV4Blob,
 } = require('./review-v3');
 const credentialStore = require('./credential-store');
 
@@ -535,14 +536,18 @@ async function callClaude(anthropicMessages) {
 
 /**
  * Process inspections — Mission 3 Phase 2 V3 categorization with V2 soft fallback.
+ * Mission 9 Phase B.1 added V4 path (8-bucket multi-approval) — opt-in via env var.
  *
  * Format selection (env var, default 'v3'):
+ *   AI_REVIEW_FORMAT=v4  → V4 prompt → assemble V4IssuesBlob (Phase B.1, opt-in).
+ *                          NO soft-fallback in Phase B.1; failures surface
+ *                          explicitly for STOP GATE 2 visibility.
  *   AI_REVIEW_FORMAT=v3  → V3 prompt → assemble V3IssuesBlob → V2-flat _displayShape.
  *                          On any V3 path failure, fall through to V2 (separate API call).
  *   AI_REVIEW_FORMAT=v2  → V2 prompt only (legacy behavior).
  *
- * Soft-fallback rationale: a V3 failure costs ~$1-3 wasted on the failed call before
- * V2 succeeds. Acceptable; bounded. Caller telemetry surfaces the failure cause.
+ * Soft-fallback rationale (V3 → V2): a V3 failure costs ~$1-3 wasted on the failed
+ * call before V2 succeeds. Acceptable; bounded. Caller telemetry surfaces the cause.
  */
 ipcMain.handle('analyze-inspections', async (event, { newInspection, previousInspections, context }) => {
   const aiReviewFormat = (process.env.AI_REVIEW_FORMAT || 'v3').toLowerCase();
@@ -550,6 +555,58 @@ ipcMain.handle('analyze-inspections', async (event, { newInspection, previousIns
   const threshold = Number.isFinite(thresholdRaw) ? thresholdRaw : 0.7;
   const debug = process.env.AI_REVIEW_DEBUG === 'true';
   const isComparisonMode = Array.isArray(previousInspections) && previousInspections.length > 0;
+
+  // V4 attempt (Mission 9 Phase B.1) — opt-in via AI_REVIEW_FORMAT=v4.
+  // No soft-fallback; failures surface explicitly for STOP GATE 2 visibility.
+  // If V4 stabilizes in production, consider adding V4→V3 fallback similar
+  // to V3→V2 below.
+  if (aiReviewFormat === 'v4') {
+    try {
+      if (debug) console.log(`[ai-review] V4 prompt — comparison=${isComparisonMode}`);
+      const v4Messages = isComparisonMode
+        ? buildV4ComparisonMessages(newInspection, previousInspections, context)
+        : buildV4SingleInspectionMessages(newInspection, context);
+
+      const rawV4Response = await callClaude(v4Messages);
+      if (debug) console.log('[ai-review] V4 raw response (first 2000 chars):', rawV4Response.substring(0, 2000));
+
+      const parsedAi = parseAnalysisResponse(rawV4Response);
+      if (!parsedAi || !Array.isArray(parsedAi.issues)) {
+        throw new Error('V4 prompt returned non-array issues');
+      }
+
+      // assembleV4Blob requires formatVersion === 'v4'. The prompt instructs
+      // the AI to emit it; if missing, throwing here surfaces the prompt-quality
+      // issue at STOP GATE 2 rather than silently coercing.
+      const v4Blob = assembleV4Blob(parsedAi);
+
+      if (debug) {
+        console.log(`[ai-review] V4 assembly — total=${v4Blob.totalIssues}, ` +
+          `decisions=${v4Blob.totalDecisions}, ` +
+          `buckets=${v4Blob.buckets.length}/8, ` +
+          `bucket_keys=${v4Blob.buckets.map((b) => b.bucketKey).join(',')}`);
+      }
+
+      return {
+        success: true,
+        result: {
+          format: 'v4',
+          overall_condition: parsedAi.overall_condition,
+          summary: parsedAi.summary,
+          issues: v4Blob,
+        },
+      };
+    } catch (v4Error) {
+      // Auth errors short-circuit (same pattern as V3): the proxy would fail
+      // identically on a V3 retry, so falling through wastes another doomed call.
+      if (v4Error.code === 'AUTH_EXPIRED' || v4Error.code === 'NOT_AUTHENTICATED') {
+        return { success: false, error: v4Error.code };
+      }
+      // ALWAYS log V4 failures — Phase B.1 STOP GATE 2 depends on this signal.
+      console.error('[ai-review] V4 emission failed:', v4Error.message);
+      return { success: false, error: v4Error.message };
+    }
+  }
 
   // V3 attempt with soft fallback
   if (aiReviewFormat === 'v3') {
@@ -1830,6 +1887,471 @@ IMPORTANT:
 - Inspections may have 50-100+ issues spanning 20+ pages. Do NOT stop early. Find ALL issues across ALL rooms including bedrooms, bathrooms, systems, garage, and exterior.
 
 ${V3_BUCKET_AND_FORMAT_INSTRUCTIONS}`,
+  });
+
+  appendInspectionContent(content, currentInspection, 'INSPECTION (Current Condition)');
+
+  content.push({
+    type: 'text',
+    text: '\n\nReturn the JSON object now. No markdown code fences. No explanation. Begin with { and end with }.',
+  });
+
+  return [{ role: 'user', content }];
+}
+
+// ============================================================================
+// V4 prompt builders (Mission 9 Phase B.1 — 8-bucket multi-approval restructure)
+// ============================================================================
+
+/**
+ * V4 categorization + format instructions.
+ *
+ * 8 buckets: cleaning | carpet | light_bulbs | pest_control | make_ready |
+ * exterior_make_ready | exterior_lawn_care | other.
+ *
+ * Mirrors V3's structural sections (bucket definitions / confidence /
+ * grouping / severity / pages / utility status / output schema) with the new
+ * V4 bucket vocabulary, multi-issue splitting, subsection keys, and the
+ * entry-door routing rule. Mission 8 utility-status block copied verbatim
+ * from V3 — cover-page extraction logic must remain identical across formats.
+ */
+const V4_BUCKET_AND_FORMAT_INSTRUCTIONS = `
+## Categorization buckets (V4 — 8 buckets with mixed approval models)
+
+You are categorizing inspection findings into 8 buckets. Each finding becomes
+one issue in the output, except when a finding describes multiple distinct
+issues — those MUST be split into separate issues. Issues will be reviewed by
+a human who decides liability (Tenant / Owner / Review / Skip); your job is
+to FIND and CATEGORIZE, not to assign liability.
+
+### Bucket: cleaning (single approval, whole bucket)
+
+House cleaning ONLY — surface dirt, dust, grime, stains, debris that wipe off
+with cleaning. Excludes carpet (own bucket), pest infestations (own bucket),
+repair-language items (make_ready).
+
+In bucket:
+- "Counter stained, debris on counter" (cosmetic surface dirt)
+- "Window covering stained" (fabric, wipe-clean)
+- "All shelves grimy with dust buildup"
+- "Cobwebs in corner of garage" (no insect mention)
+- "Items left behind in unit"
+
+NOT in bucket (route elsewhere):
+- "Carpet stained" → carpet (own bucket)
+- "Cobwebs filled with insects" → pest_control (insect signal dominates)
+- "Wall has nail holes and stains" → SPLIT: nail holes → make_ready, stains → cleaning
+
+### Bucket: carpet (mixed: cleaning subsection [single] + damage subsection [per-item])
+
+Anything specifically on carpet, rugs, area rugs, throw rugs. Two subsections:
+'cleaning' (treatable by professional cleaning) and 'damage' (replace/repair
+required).
+
+In bucket:
+- "Carpet stained throughout living room" → subsection: cleaning
+- "Carpet has cigarette burns" → subsection: damage
+- "Pet odor in carpet" → subsection: cleaning
+- "Wax on carpet from candle" → subsection: damage (won't shampoo)
+- "Carpet stained AND torn near doorway" → SPLIT: carpet/cleaning + carpet/damage
+
+NOT in bucket:
+- "Pet hair on bedroom hardwood floor" → cleaning (surface is hardwood, not carpet)
+- "Floor stained" without "carpet" mention → cleaning or make_ready
+
+### Bucket: light_bulbs (single approval, whole bucket)
+
+Burned-out bulbs, missing bulbs, bulb replacement only.
+
+In bucket:
+- "Bulbs out in bathroom"
+- "Bulb burned out in pantry"
+- "Exterior bulb burned out" (bulbs are bulbs regardless of location)
+- "Chandelier needs new bulbs"
+
+NOT in bucket:
+- "Light fixture broken" → make_ready (fixture, not bulb)
+- "Exterior light fixture missing" → exterior_make_ready
+- "Wiring issue" → make_ready
+
+### Bucket: pest_control (single approval, whole bucket)
+
+Roaches, cockroaches, ants, spiders, wasps, hornets, bees, termites, mice,
+rats, rodents, bed bugs, fleas, fly infestation, pest droppings, dead pests.
+Cobwebs WITH visible bugs/insects/spiders.
+
+In bucket:
+- "Roaches in dishwasher"
+- "Cobwebs with insects on wall" (insect mention dominates)
+- "Wasps near windowsill"
+- "Mouse droppings under sink"
+- "Dead roach in cabinet"
+
+NOT in bucket:
+- "Cobwebs in corner of garage" (no insect mention) → cleaning
+- "Stains AND roaches AND grime" → SPLIT: cleaning (stains/grime) + pest_control (roaches)
+
+### Bucket: make_ready (per-item — interior repairs)
+
+Interior repair, patching, replacement, painting, broken interior fixtures,
+missing hardware, plumbing leaks, broken windows/doors, electrical issues,
+appliance mechanical failures, wall/ceiling damage, flooring repair, nails
+and nail holes.
+
+In bucket:
+- "Hole in drywall"
+- "Missing toilet paper holder"
+- "Door chipped and scuffed"
+- "Doorbell inop" (entry-door rule — see SPECIAL RULE below)
+- "Broken light fixture"
+- "Caulking cracked, window trim broken" → SPLIT: caulking + window trim (each its own make_ready issue)
+
+NOT in bucket:
+- "Bulb burned out" → light_bulbs
+- "Carpet torn" → carpet/damage
+- "Roach infestation" → pest_control
+- "Storage door broken" (room: Back Yard/Exterior) → exterior_make_ready
+
+### Bucket: exterior_make_ready (per-item — exterior repairs)
+
+Exterior outbuilding structures: storage doors, fence/gates, sheds, garage
+doors, driveway, patio, porch, deck, siding, soffit, fascia, gutters/
+downspouts, roof, shingles, mailbox, sprinkler heads (mechanical), exterior
+lights, exterior outlets, A/C condenser, hose bibs.
+
+In bucket:
+- "Storage door broken" (Back Yard/Exterior)
+- "Fence pickets broken"
+- "Gutter clogged"
+- "Roof shingles missing"
+- "Sprinkler head broken" (mechanical repair)
+- "Garage door inop"
+
+NOT in bucket:
+- "Sprinkler not running, lawn dying" (lawn-state observation) → exterior_lawn_care/grass
+- "Exterior bulb burned out" → light_bulbs
+- "Front door damaged" (entry-door rule — see SPECIAL RULE below) → make_ready
+- "Doorbell broken" → make_ready
+
+### Bucket: exterior_lawn_care (mixed: 5 single-approval subsections — grass, bushes, trees, flowerbeds, other_lawn)
+
+Yard maintenance work on the GROWING environment.
+
+In bucket:
+- "Grass needs mowing" → subsection: grass
+- "Bushes overgrown along front of house" → subsection: bushes
+- "Dead tree in back yard" → subsection: trees
+- "Flower beds neglected with weeds" → subsection: flowerbeds
+- "Sprinkler timer off, lawn dying" → subsection: grass (lawn-state, not mechanical)
+
+NOT in bucket:
+- "Sprinkler head broken" → exterior_make_ready (mechanical repair)
+- "Tree fallen onto fence" → SPLIT: trees (fallen tree) + exterior_make_ready (fence damaged)
+
+### Bucket: other (per-item — catch-all)
+
+Property-management observations that don't fit any other bucket. Use sparingly
+— when any other bucket has confidence ≥ 0.5, prefer that bucket.
+
+In bucket:
+- "Tenant left a note saying 'sorry about the mess'" (informational)
+- Genuinely novel or uncategorizable findings
+
+NOT in bucket:
+- "Unknown stain on living room ceiling" → cleaning (stain signal dominates)
+- "Tenant's belongings still in unit" → cleaning (items left)
+
+## Subsection rules
+
+### Carpet (mixed)
+
+- damage subsection: tears, holes, burns, missing patches, frayed edges,
+  lifted seams, wax, melted material, won't shampoo, permanent stains,
+  replacement needed
+- cleaning subsection (default): stains, dirt, soiled, matted, discolored,
+  pet hair, pet odor, pet urine, vacuum, shampoo, steam clean
+- When both are present in one finding: SPLIT into carpet/cleaning +
+  carpet/damage as separate issues
+- damage match wins; if no damage indicators, default to cleaning
+
+### Exterior Lawn Care (mixed, priority order: flowerbeds → trees → bushes → grass → other_lawn)
+
+Specific subsection terms (flowerbeds/trees/bushes) win over the broader
+grass vocabulary when both appear in one finding.
+
+- flowerbeds: flower bed, flowerbed, mulch, garden, planter, neglected garden
+  ("Flower beds neglected with weeds" → flowerbeds, NOT grass)
+- trees: tree, branch, fallen branch/tree, dead tree/branch, stump,
+  prune tree, tree overhanging
+- bushes: bush, hedge, shrub, prune (bush/hedge/shrub),
+  overgrown (bush/hedge/shrub), dead (bush/hedge/shrub)
+- grass: grass, lawn, mow, edging, weed, brown grass/patch, dead grass,
+  tall grass, overgrown lawn
+- other_lawn: sprinkler (state, not broken), rock garden, decorative rock,
+  lawn ornament, fountain, bird bath, lawn furniture left
+
+## Multi-issue splitting
+
+When you see a single inspection finding that mentions multiple distinct
+issues, SPLIT IT into separate issues[] entries. An issue is "distinct" if it
+would receive a different repair/cleaning action.
+
+Example input: "Stains, scuffs, unfinished patches, nails in walls, cobwebs
+with bugs, edge of wall chipped"
+
+Example output: 6 separate issues:
+- "Stains" (bucket: cleaning, severity: minor)
+- "Scuffs" (bucket: cleaning, severity: minor)
+- "Unfinished patches" (bucket: make_ready, severity: moderate)
+- "Nails in walls" (bucket: make_ready, severity: minor)
+- "Cobwebs with bugs" (bucket: pest_control, severity: moderate)
+- "Edge of wall chipped" (bucket: make_ready, severity: minor)
+
+Splitting heuristics:
+- 3+ comma-separated phrases at top level → likely multi-issue
+- "filled with X and Y" or "covered in X and Y" enumerations → split per element
+- Cross-bucket vocabulary (e.g., "stains" + "nails") → MANDATORY split
+
+DO NOT collapse distinct issues just because they share a room or area.
+
+## Confidence scoring (bucketConfidence)
+
+For each issue, emit bucketConfidence (0.0–1.0):
+- 0.9–1.0: bucket assignment is unambiguous (e.g., "cobwebs with bugs" → pest_control)
+- 0.7–0.9: confident but defensible alternatives exist
+- 0.5–0.7: genuinely borderline; system may apply deterministic fallback
+- < 0.5: low confidence; flag for review
+
+Be honest. A confident wrong bucket is worse than a low-confidence bucket the
+fallback can correct.
+
+## Subsection key emission
+
+Required field for issues with bucket: 'carpet':
+- subsectionKey: 'cleaning' | 'damage'
+
+Required field for issues with bucket: 'exterior_lawn_care':
+- subsectionKey: 'grass' | 'bushes' | 'trees' | 'flowerbeds' | 'other_lawn'
+
+Omit subsectionKey (use null) for the other 6 buckets: cleaning, light_bulbs,
+pest_control, make_ready, exterior_make_ready, other.
+
+## Entry-door routing rule
+
+SPECIAL RULE: doorbells, front entry doors, back entry doors, screen doors,
+storm doors → bucket: make_ready (interior infrastructure even when room is
+"Front Yard/Exterior" or "Back Yard/Exterior"). Storage shed doors, garage
+doors, fence gates, sheds → bucket: exterior_make_ready.
+
+## Grouping (groupKey + groupLabel)
+
+When the SAME type of issue appears in multiple rooms, emit the same
+\`groupKey\` (kebab-case slug) and \`groupLabel\` (human-readable) on each
+issue. The system collapses identical groupKeys into one group so the reviewer
+sees them together.
+
+Examples:
+- "Baseboards — dusty" in 5 rooms → groupKey: "baseboards-dusty",
+  groupLabel: "Baseboards — Dusty"
+- "Outlet cover missing" in 3 rooms → groupKey: "outlet-cover-missing",
+  groupLabel: "Outlet Cover — Missing"
+
+Distinct issues get distinct groupKeys. Don't over-group: a stained countertop
+and a stained cabinet are different.
+
+## Severity enum (strict)
+
+Use exactly one of: \`minor\`, \`moderate\`, \`major\`. Do not invent values.
+
+## Page references
+
+When the screenshots show a page number (e.g., "Page 3 of 149"), include the
+integer in \`pageReferences\` (e.g., \`[3]\`). If multiple pages document the
+same issue, include all (\`[3, 4]\`). If no page number is visible, emit \`[]\`.
+
+## Property utility status (extract from cover page, NOT from defect descriptions)
+
+ALSO extract property-level utility status from the inspection PDF's COVER PAGE
+or property-metadata section. Output as a top-level \`utilityStatus\` object:
+
+  "utilityStatus": {
+    "water": "on" | "off" | "unknown",
+    "power": "on" | "off" | "unknown",
+    "gas": "on" | "off" | "unknown"
+  }
+
+Use 'on' when the cover page indicates the utility is active (check marks next
+to the utility name, "water on", absence of any "no service" notes, AND
+fixtures throughout the inspection report appear functional).
+
+Use 'off' when the cover page or multiple fixtures throughout the inspection
+report consistently indicate the utility is unavailable (e.g., "no water
+service to property", 6+ fixtures all reporting "no water", similar systemic
+patterns for power/gas).
+
+IMPORTANT: a single fixture's "no water" note is NOT sufficient to call water
+'off' at the property level. Single-fixture issues are localized (a broken
+sink, an unhooked toilet) and may be unrelated to property-wide utility
+service. Use 'off' ONLY when EITHER:
+  (a) the cover page or property metadata section EXPLICITLY indicates the
+      utility is shut off, OR
+  (b) 6+ separate fixtures throughout the inspection report consistently show
+      the same utility unavailable (e.g., 6+ different fixtures all reporting
+      "no water", not just one).
+If only 1-5 fixtures report a utility issue, that's localized fixture failure —
+return 'unknown' for that utility, NOT 'off'.
+
+Use 'unknown' when the cover page does not indicate utility status AND the
+inspection findings don't provide a clear systemic signal either way. When in
+doubt, use 'unknown' — false 'off' calls are worse than missing data.
+
+Do NOT use individual defect mentions to infer property-level utility status.
+"Leaking water heater", "kitchen faucet drips", "rusty water heater", "outlet
+near breaker" are all LOCALIZED fixture issues, not utility-service status.
+A property with 50+ defect-level water mentions can still have water service
+ON. The signal you're looking for is property-wide, not fixture-level.
+
+## Output schema (strict — return ONLY this JSON, no prose, no code fences)
+
+{
+  "formatVersion": "v4",
+  "overall_condition": "fair",
+  "summary": "Property has cleaning issues throughout, several maintenance items needed.",
+  "utilityStatus": { "water": "on", "power": "on", "gas": "unknown" },
+  "issues": [
+    {
+      "room": "Kitchen",
+      "area": "Counter near sink",
+      "description": "Dark ring stain ~4 inches",
+      "severity": "moderate",
+      "pageReferences": [4],
+      "isNewSinceMoveIn": true,
+      "moveInNote": null,
+      "bucket": "cleaning",
+      "subsectionKey": null,
+      "bucketConfidence": 0.92,
+      "groupKey": "counters-stained",
+      "groupLabel": "Counters — Stained"
+    }
+  ]
+}
+
+## Strict output rules
+
+- issues[] is FLAT — one element per distinct issue (no nested groups)
+- bucket MUST be one of: cleaning | carpet | light_bulbs | pest_control | make_ready | exterior_make_ready | exterior_lawn_care | other (no other values permitted)
+- severity MUST be one of: minor | moderate | major
+- groupKey is a stable kebab-case identifier shared by issues with the same groupLabel
+- DO NOT wrap output in markdown code fences or explanatory prose — output raw JSON only
+`;
+
+/**
+ * Build V4 comparison-mode messages (move-out vs move-in).
+ * Same content layout as buildV3ComparisonMessages but asks for the V4 schema.
+ */
+function buildV4ComparisonMessages(newInspection, previousInspections, context) {
+  const content = [];
+
+  const propertyInfo = `Property: ${context.address || newInspection.property?.address || 'Property'}
+Unit: ${context.unit || newInspection.property?.unit || ''}
+Tenant: ${context.tenant || newInspection.property?.tenant || 'Tenant'}
+Lease Duration: ${context.leaseDuration || 'Not specified'}`;
+
+  const hasTableData = newInspection.tableData?.length > 0;
+  const tableInstruction = hasTableData
+    ? `\n\nA structured table has also been extracted as text. Cross-reference it with the screenshots to ensure you don't miss any items.`
+    : '';
+
+  content.push({
+    type: 'text',
+    text: `You are a property inspection analyst. Your job is to FIND every issue and CATEGORIZE each one — a human reviewer will decide liability.
+
+${propertyInfo}
+
+TASK: Compare the MOVE-OUT inspection against the MOVE-IN inspection. For every issue you find:
+1. Describe exactly what you see
+2. Note the room and specific area
+3. Categorize into one of 8 buckets (see below)
+4. Score how confident you are about the bucket
+5. Reference the page number when visible
+6. Set isNewSinceMoveIn = true when the move-in inspection did NOT show this issue,
+   false when it did (i.e., pre-existing)
+${tableInstruction}
+
+IMPORTANT:
+- List EVERY issue you can find, even minor ones — the reviewer will skip what doesn't matter
+- Do NOT decide who is responsible — the reviewer assigns Tenant/Owner/Review/Skip
+- Do NOT estimate costs — that is the reviewer's job
+- DO note if an issue appears in the move-in photos/data
+- Be specific about location: "left wall near window" not just "wall"
+- Go through EVERY screenshot page — the condition summary spans multiple pages
+- Cross-reference the extracted text data if provided
+- Inspections may have 50-100+ issues spanning 20+ pages. Do NOT stop early. Find ALL issues across ALL rooms including bedrooms, bathrooms, systems, garage, and exterior.
+- BOTH inspections (move-out AND move-in) have full data. Check every item.
+
+${V4_BUCKET_AND_FORMAT_INSTRUCTIONS}`,
+  });
+
+  appendInspectionContent(content, newInspection, 'MOVE-OUT INSPECTION (Current Condition)');
+
+  const moveIn = previousInspections[0];
+  if (moveIn) {
+    appendInspectionContent(content, moveIn, 'MOVE-IN INSPECTION (Baseline)');
+  } else {
+    content.push({ type: 'text', text: '\n\n## NO MOVE-IN INSPECTION PROVIDED\nAnalyze only the current condition.\n' });
+  }
+
+  content.push({
+    type: 'text',
+    text: '\n\nReturn the JSON object now. No markdown code fences. No explanation. Begin with { and end with }.',
+  });
+
+  return [{ role: 'user', content }];
+}
+
+/**
+ * Build V4 single-inspection-mode messages (no comparison baseline).
+ * AI sets isNewSinceMoveIn=true uniformly; orchestrator overrides liability
+ * to 'unassigned' for all issues per Q14.
+ */
+function buildV4SingleInspectionMessages(currentInspection, context) {
+  const content = [];
+
+  const propertyInfo = `Property: ${context.address || currentInspection.property?.address || 'Property'}
+Unit: ${context.unit || currentInspection.property?.unit || ''}
+Tenant: ${context.tenant || currentInspection.property?.tenant || 'Tenant'}
+Lease Duration: ${context.leaseDuration || 'Not specified'}`;
+
+  const hasTableData = currentInspection.tableData?.length > 0;
+  const tableInstruction = hasTableData
+    ? `\n\nA structured table has also been extracted as text. Cross-reference it with the screenshots to ensure you don't miss any items.`
+    : '';
+
+  content.push({
+    type: 'text',
+    text: `You are a property inspection analyst. Your job is to FIND every issue and CATEGORIZE each one — a human reviewer will decide liability.
+
+${propertyInfo}
+
+TASK: Review this inspection and catalog every issue. For each issue:
+1. Describe exactly what you see
+2. Note the room and specific area
+3. Categorize into one of 8 buckets (see below)
+4. Score your confidence about the bucket
+5. Reference the page number when visible
+6. Set isNewSinceMoveIn = true (no move-in baseline provided; the reviewer will assign liability)
+${tableInstruction}
+
+IMPORTANT:
+- List EVERY issue you can find, even minor ones — the reviewer will skip what doesn't matter
+- Do NOT decide who is responsible — the reviewer assigns Tenant/Owner/Review/Skip
+- Do NOT estimate costs — that is the reviewer's job
+- Be specific about location: "left wall near window" not just "wall"
+- Go through EVERY screenshot page — the condition summary spans multiple pages
+- Cross-reference the extracted text data if provided
+- Inspections may have 50-100+ issues spanning 20+ pages. Do NOT stop early. Find ALL issues across ALL rooms including bedrooms, bathrooms, systems, garage, and exterior.
+
+${V4_BUCKET_AND_FORMAT_INSTRUCTIONS}`,
   });
 
   appendInspectionContent(content, currentInspection, 'INSPECTION (Current Condition)');
