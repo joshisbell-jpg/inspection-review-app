@@ -90,6 +90,133 @@ async function applyStealthMode(page) {
   });
 }
 
+// ============================================
+// Mission 10 Workstream B — inspection-review:// deep-link handoff
+// ============================================
+//
+// The web /ai-review/new "Link to Inspection" tab fires
+//   inspection-review://import?platform=appfolio&urls=URL1,URL2
+// to hand off scraping to this Electron app (which has the inspector's
+// AppFolio / zInspector session cookies). Cold-start: protocol URL
+// arrives via process.argv on Windows. Warm-start: the URL arrives via
+// the `second-instance` event (Windows / Linux) or `open-url` event
+// (macOS). The handler forwards the parsed payload to the renderer
+// over an IPC channel; renderer populates current-link + previous-links
+// and runs the existing processInspections() flow unchanged.
+//
+// Single-instance lock prevents the OS from spawning a second app
+// instance when the user clicks a deep link with the app already open —
+// the existing instance picks up the URL via second-instance.
+
+let pendingDeepLink = null; // payload buffered until renderer is ready
+let rendererReady = false;
+
+function parseDeepLink(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'inspection-review:') return null;
+    // We only accept inspection-review://import for now. Future actions
+    // (e.g., open-review/, settings/) can branch on hostname.
+    if (u.hostname !== 'import') return null;
+    const platform = (u.searchParams.get('platform') || '').toLowerCase();
+    const urlsParam = u.searchParams.get('urls') || '';
+    const urls = urlsParam
+      .split(',')
+      .map((s) => decodeURIComponent(s.trim()))
+      .filter((s) => s.length > 0);
+    if (!['appfolio', 'zinspector'].includes(platform)) return null;
+    if (urls.length === 0) return null;
+    return { platform, urls };
+  } catch (err) {
+    console.warn('[deep-link] parse failed:', err && err.message);
+    return null;
+  }
+}
+
+function dispatchDeepLink(payload) {
+  if (!payload) return;
+  if (mainWindow && rendererReady) {
+    try {
+      mainWindow.webContents.send('inspection-import-deep-link', payload);
+      mainWindow.focus();
+    } catch (err) {
+      console.warn('[deep-link] dispatch failed:', err && err.message);
+    }
+  } else {
+    pendingDeepLink = payload;
+  }
+}
+
+function findDeepLinkInArgv(argv) {
+  if (!Array.isArray(argv)) return null;
+  for (const arg of argv) {
+    if (typeof arg === 'string' && arg.startsWith('inspection-review://')) {
+      const parsed = parseDeepLink(arg);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+// Register the custom protocol. On Windows this writes to the registry
+// at install time (electron-builder handles it for packaged builds; dev
+// runs use the live-registration here, scoped to the current exe path).
+// On macOS this is registered via the Info.plist by electron-builder;
+// the setAsDefaultProtocolClient call is still a no-op-safe dev hint.
+if (process.defaultApp && process.argv.length >= 2) {
+  // Dev mode: pass the script path so the OS can re-launch us correctly.
+  app.setAsDefaultProtocolClient('inspection-review', process.execPath, [
+    path.resolve(process.argv[1]),
+  ]);
+} else {
+  app.setAsDefaultProtocolClient('inspection-review');
+}
+
+// Single-instance lock. If we can't acquire it, another instance is
+// already running — it will receive our argv via `second-instance`.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv /*, workingDirectory */) => {
+    // Another launch attempt while we're already running — pull the
+    // deep link out of the new argv if present, then re-focus.
+    const payload = findDeepLinkInArgv(argv);
+    dispatchDeepLink(payload);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+
+  // macOS: deep-link arrives as an open-url event rather than via argv.
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    const payload = parseDeepLink(url);
+    dispatchDeepLink(payload);
+  });
+}
+
+// Cold-start parse — capture any deep link from our initial argv now so
+// that whenever the renderer signals ready, we can dispatch it.
+const initialDeepLink = findDeepLinkInArgv(process.argv);
+if (initialDeepLink) {
+  pendingDeepLink = initialDeepLink;
+}
+
+// Renderer announces readiness via this one-way IPC. We then flush any
+// buffered deep link. This is preferable to relying on did-finish-load
+// because the renderer can install its own event listener BEFORE telling
+// us it's ready.
+ipcMain.on('deep-link-renderer-ready', () => {
+  rendererReady = true;
+  if (pendingDeepLink) {
+    const payload = pendingDeepLink;
+    pendingDeepLink = null;
+    dispatchDeepLink(payload);
+  }
+});
+
 // Create the main app window
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -107,9 +234,19 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  // Reset rendererReady when the window reloads — old renderer is gone.
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererReady = false;
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    rendererReady = false;
+  });
 }
 
-app.whenReady().then(createWindow);
+if (gotSingleInstanceLock) {
+  app.whenReady().then(createWindow);
+}
 
 app.on('window-all-closed', async () => {
   if (browserInstance) {

@@ -1634,6 +1634,51 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       showLoginError('Your session has expired. Please log in again.');
     });
 
+    // Mission 10 Workstream B — inspection-review:// deep-link handoff.
+    // Web fires the protocol → main process dispatches the parsed payload
+    // here. We populate the URL inputs with the received list, update
+    // button states, and show an inline notice so the inspector knows the
+    // request came from the web app. processInspections() stays manual —
+    // the inspector clicks Start when they're ready.
+    function showDeepLinkNotice(message) {
+      let notice = document.getElementById('deep-link-notice');
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'deep-link-notice';
+        notice.style.cssText = 'margin:12px 0;padding:10px 14px;border-radius:6px;background:#e0f2fe;border:1px solid #7dd3fc;color:#075985;font-size:14px;';
+        const inputSec = document.getElementById('input-section');
+        if (inputSec) inputSec.insertBefore(notice, inputSec.firstChild);
+      }
+      notice.textContent = message;
+    }
+
+    window.api.onInspectionImportDeepLink(({ platform, urls }) => {
+      console.log('[deep-link] received', platform, urls);
+      if (!urls || urls.length === 0) return;
+      // Populate inputs + module-level variables. We can't fire the
+      // input-event handler programmatically (.dispatchEvent on .value=...
+      // is unreliable across Chromium versions), so mirror what the
+      // input listeners do: assign + recompute.
+      currentLinkInput.value = urls[0];
+      currentLink = urls[0];
+      const rest = urls.slice(1);
+      if (rest.length > 0) {
+        previousLinksInput.value = rest.join('\n');
+        previousLinks = rest.filter((l) => l.startsWith('http'));
+      } else {
+        previousLinksInput.value = '';
+        previousLinks = [];
+      }
+      updateButtonStates();
+      showDeepLinkNotice(
+        'Received ' + urls.length + ' inspection' + (urls.length === 1 ? '' : 's') +
+        ' from web (' + platform + '). Click Step 1: Login if needed, then Start.',
+      );
+    });
+    // Tell main process we're ready to receive deep links — flushes any
+    // cold-start payload that arrived before this listener was installed.
+    window.api.deepLinkRendererReady();
+
     // Bootstrap: decide which view to show on launch.
     (async () => {
       try {

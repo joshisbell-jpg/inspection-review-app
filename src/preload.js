@@ -60,4 +60,18 @@ contextBridge.exposeInMainWorld('api', {
   // https://www.keepsimplecrm.com/* is allowed. Used for the forgot-
   // password link.
   openExternalUrl: (url) => ipcRenderer.invoke('open-external-url', url),
+
+  // ----- Mission 10 Workstream B — inspection-review:// deep-link handoff -----
+
+  // Subscribe to inspection-import deep links. Callback receives
+  // { platform: 'appfolio'|'zinspector', urls: string[] }. The renderer
+  // should call deepLinkRendererReady() once it has installed this
+  // listener so the main process can flush any link buffered during
+  // cold-start.
+  onInspectionImportDeepLink: (callback) => {
+    ipcRenderer.on('inspection-import-deep-link', (_event, payload) => callback(payload));
+  },
+
+  // Tell main process the renderer is ready to receive deep-link events.
+  deepLinkRendererReady: () => ipcRenderer.send('deep-link-renderer-ready'),
 });
