@@ -469,16 +469,45 @@
       font-size: 13px; color: var(--text-secondary); margin-top: 6px;
     }
 
-    /* v1.2.2 — inline save-error block (replaces blocking alert during /v4/save 401). */
-    .save-error-box {
-      margin: 12px 0;
-      padding: 12px 14px;
-      background: var(--danger-bg);
-      border: 1px solid var(--danger);
-      border-radius: var(--radius);
-      color: var(--danger);
+    /* v1.2.3 Fix 3 — full-screen modal save-error dialog (replaces v1.2.2's
+       inline box). Backdrop dims the app; card is centered; auto-focused via
+       JS; persistent until Dismiss / Retry. */
+    .save-error-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      /* display set by JS: 'flex' to show, 'none' to hide */
     }
-    .save-error-box p { margin-bottom: 8px; color: var(--danger); font-size: 14px; }
+    .save-error-card {
+      background: var(--bg-primary);
+      border: 2px solid var(--danger);
+      border-radius: var(--radius-lg);
+      padding: 28px 32px;
+      max-width: 520px;
+      width: calc(100% - 48px);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    }
+    .save-error-title {
+      margin: 0 0 12px;
+      color: var(--danger);
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .save-error-message {
+      margin: 0 0 20px;
+      color: var(--text-primary);
+      font-size: 15px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .save-error-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
 
     /* ----- Mission 7.2 Phase B: login screen + user indicator ----- */
 
@@ -718,12 +747,25 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
           <span class="badge badge-success">Complete</span>
         </div>
         <div id="results-container"></div>
-        <!-- v1.2.2 Bug 2 fix — inline save error with Retry. Replaces the
-             blocking alert() pattern that fought with the auth-expired login
-             takeover. Shown after a Save failure; cleared on next attempt. -->
-        <div id="save-error" class="save-error-box" style="display:none">
-          <p id="save-error-message"></p>
-          <button class="btn btn-warning btn-small" id="save-retry-btn">Retry Save</button>
+        <!-- v1.2.3 Fix 3 — full-screen modal save-error dialog. Replaces
+             v1.2.2's inline error box, which was easy to miss when the window
+             was minimized or on a secondary monitor (904 Santa Rosa diagnostic:
+             Josh did not notice an in-flight save failure for 4+ hours).
+             Modal pulls focus, beeps via main process, and is persistent until
+             explicitly dismissed or retried. Same `#save-error` id and
+             `#save-retry-btn` retained so existing JS hooks stay wired. -->
+        <div id="save-error" class="save-error-modal" style="display:none"
+             role="alertdialog" aria-modal="true"
+             aria-labelledby="save-error-title" aria-describedby="save-error-message"
+             tabindex="-1">
+          <div class="save-error-card" role="document">
+            <h2 id="save-error-title" class="save-error-title">Save Failed</h2>
+            <p id="save-error-message" class="save-error-message"></p>
+            <div class="save-error-actions">
+              <button class="btn btn-warning" id="save-retry-btn">Retry Save</button>
+              <button class="btn btn-secondary" id="save-error-dismiss">Dismiss</button>
+            </div>
+          </div>
         </div>
         <div class="action-buttons">
           <button class="btn btn-primary" id="copy-owner-email">Copy Owner Email</button>
@@ -927,6 +969,11 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       const hasCurrentUrl = currentLink.startsWith('http');
       const hasCurrentPdf = !!currentPdfPath;
       if (!hasCurrentUrl && !hasCurrentPdf) return;
+
+      // v1.2.3 Fix 2 — reset Save to CRM button BEFORE doing anything else,
+      // so the green "Saved to CRM" text from a prior inspection never
+      // carries over into a new one. Also hides any stale save-error modal.
+      resetSaveButton();
 
       // Mint a session id for V4 saves. The /v4/save audit row carries this so
       // the server can correlate each save with its originating client run.
@@ -2047,17 +2094,65 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     //     stays visible; button re-enabled labeled 'Save to CRM'
     //   - User can either click Save to CRM or click Retry Save — both fire
     //     this same function
+    // v1.2.3 Fix 3 — modal save errors. The error UI must survive a minimized
+    // window or a second monitor. Modal: dims app, beeps via main process,
+    // flashes taskbar, auto-focuses so screen readers and keyboard users land
+    // here, and is persistent until Retry or Dismiss is clicked. Keyboard
+    // focus is trapped to the two modal buttons so the user can't accidentally
+    // tab through to Save to CRM behind the backdrop and re-fire a save.
+    function trapModalTab(e) {
+      if (e.key !== 'Tab') return;
+      const retryBtn = document.getElementById('save-retry-btn');
+      const dismissBtn = document.getElementById('save-error-dismiss');
+      if (!retryBtn || !dismissBtn) return;
+      if (e.shiftKey && document.activeElement === retryBtn) {
+        e.preventDefault();
+        dismissBtn.focus();
+      } else if (!e.shiftKey && document.activeElement === dismissBtn) {
+        e.preventDefault();
+        retryBtn.focus();
+      }
+    }
     function showSaveError(message) {
-      const errEl = document.getElementById('save-error');
+      const modal = document.getElementById('save-error');
       const msgEl = document.getElementById('save-error-message');
-      if (errEl && msgEl) {
+      if (modal && msgEl) {
         msgEl.textContent = message;
-        errEl.style.display = 'block';
+        modal.style.display = 'flex';
+        // Pull focus to Retry Save (the primary action). Tab cycles to Dismiss
+        // and back; trapModalTab clamps focus inside the modal.
+        modal.addEventListener('keydown', trapModalTab);
+        const retryBtn = document.getElementById('save-retry-btn');
+        if (retryBtn) retryBtn.focus(); else modal.focus();
+        // System beep + taskbar flash. Best-effort — if main process is mid-
+        // teardown or IPC drops, surface failure silently rather than block.
+        if (window.api && typeof window.api.saveErrorAlert === 'function') {
+          try { window.api.saveErrorAlert(); } catch (e) { /* best-effort */ }
+        }
       }
     }
     function hideSaveError() {
-      const errEl = document.getElementById('save-error');
-      if (errEl) errEl.style.display = 'none';
+      const modal = document.getElementById('save-error');
+      if (modal) {
+        modal.style.display = 'none';
+        modal.removeEventListener('keydown', trapModalTab);
+      }
+    }
+
+    // v1.2.3 Fix 2 — explicit reset of the Save to CRM button. The button's
+    // "Saved to CRM" green-success state is set only after a confirmed 2xx
+    // from the server, but it would persist across the next inspection until
+    // runSaveToCrm flipped it back. 904 Santa Rosa diagnostic suggested
+    // visual carry-over was one possible cause of the user-reported silent-
+    // success symptom. Reset is now called at the START of every new
+    // processInspections run, in addition to resetAllInFlightState.
+    function resetSaveButton() {
+      const btn = document.getElementById('save-to-crm');
+      if (btn) {
+        btn.textContent = 'Save to CRM';
+        btn.disabled = false;
+      }
+      hideSaveError();
     }
 
     async function runSaveToCrm() {
@@ -2130,6 +2225,10 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
 
     document.getElementById('save-to-crm').addEventListener('click', () => { runSaveToCrm(); });
     document.getElementById('save-retry-btn').addEventListener('click', () => { runSaveToCrm(); });
+    // v1.2.3 Fix 3 — modal dismiss. Closes the modal WITHOUT re-running the
+    // save. The Save to CRM button stays enabled below so the user can edit
+    // decisions and try again, or click Retry Save inside the modal.
+    document.getElementById('save-error-dismiss').addEventListener('click', () => { hideSaveError(); });
 
     // Mission 7.2 Phase B: extracted from #start-new so the logout handler
     // can reset to the same blank slate before showing the login screen.
@@ -2147,8 +2246,10 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       v4Result = null;
       v4Decisions = { bucketDecisions: {}, itemDecisions: {}, itemSkipped: {} };
       v4SessionId = null;
-      // v1.2.2 — clear any leftover save-error block so a New Review starts clean
-      hideSaveError();
+      // v1.2.3 Fix 2 — explicit save-button reset (hideSaveError is also called
+      // by resetSaveButton, so the older standalone hideSaveError() line is
+      // subsumed here).
+      resetSaveButton();
 
       // Reset PDF state
       currentPdfPath = null;
