@@ -66,6 +66,12 @@ contextBridge.exposeInMainWorld('api', {
   // password link.
   openExternalUrl: (url) => ipcRenderer.invoke('open-external-url', url),
 
+  // v1.2.3 Fix 3 — trigger an audible + visual alert from the main process
+  // when a save fails. Plays the system beep and flashes the taskbar frame
+  // on Windows. Best-effort; the renderer's showSaveError() catches any
+  // throw and surfaces the modal regardless.
+  saveErrorAlert: () => ipcRenderer.invoke('save-error-alert'),
+
   // ----- Mission 10 Workstream B — inspection-review:// deep-link handoff -----
 
   // Subscribe to inspection-import deep links. Callback receives

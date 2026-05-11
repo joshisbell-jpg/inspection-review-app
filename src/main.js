@@ -401,6 +401,27 @@ ipcMain.handle('open-external-url', async (event, url) => {
   await shell.openExternal(url);
 });
 
+// v1.2.3 Fix 3 — fire an audible + visual alert when a save fails. The
+// renderer's showSaveError() builds the modal; this handler adds the system-
+// level signals so the user notices even with the window minimized or on a
+// second monitor. shell.beep() plays the OS default sound; flashFrame(true)
+// pulses the Windows taskbar icon until the window regains focus. Best-
+// effort: any failure is logged and swallowed — never block the modal flow.
+ipcMain.handle('save-error-alert', async () => {
+  try {
+    shell.beep();
+  } catch (err) {
+    console.log('[save-error-alert] shell.beep failed:', err && err.message);
+  }
+  try {
+    if (mainWindow && typeof mainWindow.flashFrame === 'function') {
+      mainWindow.flashFrame(true);
+    }
+  } catch (err) {
+    console.log('[save-error-alert] flashFrame failed:', err && err.message);
+  }
+});
+
 // --------------------------------------------
 // Existing handlers
 // --------------------------------------------
