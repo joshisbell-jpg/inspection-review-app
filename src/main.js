@@ -769,7 +769,15 @@ async function callClaude(anthropicMessages) {
  * call before V2 succeeds. Acceptable; bounded. Caller telemetry surfaces the cause.
  */
 ipcMain.handle('analyze-inspections', async (event, { newInspection, previousInspections, context }) => {
-  const aiReviewFormat = (process.env.AI_REVIEW_FORMAT || 'v3').toLowerCase();
+  // Mission 7.2 Phase C v1.2.1 hotfix — default flipped from 'v3' to 'v4'.
+  // Phase B documented v3 as the safe default for opt-in V4 testing; Phase C
+  // ships the V4 renderer + V4 save IPC, so v4 is now the production default.
+  // The env var continues to work as an OVERRIDE for legacy V3 testing.
+  // Logged below so future debug can confirm which format is active.
+  const aiReviewFormat = (process.env.AI_REVIEW_FORMAT || 'v4').toLowerCase();
+  if (process.env.AI_REVIEW_DEBUG === 'true' || !process.env.AI_REVIEW_FORMAT) {
+    console.log(`[ai-review] format=${aiReviewFormat} (${process.env.AI_REVIEW_FORMAT ? 'env override' : 'default'})`);
+  }
   const thresholdRaw = Number(process.env.AI_REVIEW_CONFIDENCE_THRESHOLD);
   const threshold = Number.isFinite(thresholdRaw) ? thresholdRaw : 0.7;
   const debug = process.env.AI_REVIEW_DEBUG === 'true';
@@ -2092,6 +2100,19 @@ When the screenshots show a page number (e.g., "Page 3 of 149"), include the
 integer in \`pageReferences\` (e.g., \`[3]\`). If multiple pages document the
 same issue, include all (\`[3, 4]\`). If no page number is visible, emit \`[]\`.
 
+## Move-in note formatting (comparison mode only)
+
+When \`moveInNote\` is set (the issue was also in the move-in inspection), the
+note MUST start with the move-in PDF page reference if you can identify it,
+followed by an em-dash and the original move-in text. Examples:
+
+  "moveInNote": "Page 9 — Same stain noted on counter near sink"
+  "moveInNote": "Page 12 — Carpet showed minor wear in living room"
+
+If you cannot identify which page of the move-in PDF documents the prior
+condition, emit the note without the page prefix. Set \`moveInNote\` to null
+when \`isNewSinceMoveIn\` is true (no baseline to compare against).
+
 ## Property utility status (extract from cover page, NOT from defect descriptions)
 
 ALSO extract property-level utility status from the inspection PDF's COVER PAGE
@@ -2550,6 +2571,19 @@ Use exactly one of: \`minor\`, \`moderate\`, \`major\`. Do not invent values.
 When the screenshots show a page number (e.g., "Page 3 of 149"), include the
 integer in \`pageReferences\` (e.g., \`[3]\`). If multiple pages document the
 same issue, include all (\`[3, 4]\`). If no page number is visible, emit \`[]\`.
+
+## Move-in note formatting (comparison mode only)
+
+When \`moveInNote\` is set (the issue was also in the move-in inspection), the
+note MUST start with the move-in PDF page reference if you can identify it,
+followed by an em-dash and the original move-in text. Examples:
+
+  "moveInNote": "Page 9 — Same stain noted on counter near sink"
+  "moveInNote": "Page 12 — Carpet showed minor wear in living room"
+
+If you cannot identify which page of the move-in PDF documents the prior
+condition, emit the note without the page prefix. Set \`moveInNote\` to null
+when \`isNewSinceMoveIn\` is true (no baseline to compare against).
 
 ## Property utility status (extract from cover page, NOT from defect descriptions)
 

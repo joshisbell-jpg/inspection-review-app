@@ -469,6 +469,17 @@
       font-size: 13px; color: var(--text-secondary); margin-top: 6px;
     }
 
+    /* v1.2.2 — inline save-error block (replaces blocking alert during /v4/save 401). */
+    .save-error-box {
+      margin: 12px 0;
+      padding: 12px 14px;
+      background: var(--danger-bg);
+      border: 1px solid var(--danger);
+      border-radius: var(--radius);
+      color: var(--danger);
+    }
+    .save-error-box p { margin-bottom: 8px; color: var(--danger); font-size: 14px; }
+
     /* ----- Mission 7.2 Phase B: login screen + user indicator ----- */
 
     .login-screen {
@@ -707,6 +718,13 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
           <span class="badge badge-success">Complete</span>
         </div>
         <div id="results-container"></div>
+        <!-- v1.2.2 Bug 2 fix — inline save error with Retry. Replaces the
+             blocking alert() pattern that fought with the auth-expired login
+             takeover. Shown after a Save failure; cleared on next attempt. -->
+        <div id="save-error" class="save-error-box" style="display:none">
+          <p id="save-error-message"></p>
+          <button class="btn btn-warning btn-small" id="save-retry-btn">Retry Save</button>
+        </div>
         <div class="action-buttons">
           <button class="btn btn-primary" id="copy-owner-email">Copy Owner Email</button>
           <button class="btn btn-secondary" id="copy-tenant-email">Copy Tenant Email</button>
@@ -1071,10 +1089,19 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
         
         if (!analysisResult.success) {
           updateProgressItem('analysis', 'error');
-          // Auth codes route through onAuthExpired (login screen takeover); suppress
-          // the generic "Analysis failed" banner to avoid double-surfacing the same event.
+          // v1.2.2 Bug 2 fix — surface AUTH_EXPIRED with a real recovery
+          // path. Previous behavior was a silent `return;` that left the
+          // progress section stuck with a ✗ analysis item and no buttons
+          // to click. New behavior: activate errorBox with a message that
+          // tells the user to re-login (the onAuthExpired event already
+          // surfaced the login screen separately) then click Retry. The
+          // existing retryBtn click handler already calls processInspections
+          // again with currentInspection + prevInspections preserved in
+          // memory per the Phase B contract.
           if (analysisResult.error === 'AUTH_EXPIRED' || analysisResult.error === 'NOT_AUTHENTICATED') {
-            return; // login screen already showing, in-memory state preserved per Phase B contract
+            errorMessage.textContent = 'Session expired during AI analysis. After signing in again, click Retry to re-run the inspection. Your uploaded PDFs and context are preserved.';
+            errorBox.classList.add('active');
+            return;
           }
           throw new Error('Analysis failed: ' + analysisResult.error);
         }
@@ -2008,7 +2035,32 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       a.click();
     });
 
-    document.getElementById('save-to-crm').addEventListener('click', async () => {
+    // v1.2.2 Bug 2 fix — save-to-crm extracted into a function so both the
+    // primary Save to CRM button AND the Retry Save button (shown after a
+    // 401 / network failure) can re-trigger the same flow. The previous
+    // implementation used a blocking alert() inside the click handler that
+    // fought with the auth-expired login-screen takeover, leaving the UI
+    // half-rendered. New flow:
+    //   - Save click clears the inline save-error block and runs the save
+    //   - Success → button labeled 'Saved to CRM'
+    //   - Failure → save-error block shows the message + Retry Save button
+    //     stays visible; button re-enabled labeled 'Save to CRM'
+    //   - User can either click Save to CRM or click Retry Save — both fire
+    //     this same function
+    function showSaveError(message) {
+      const errEl = document.getElementById('save-error');
+      const msgEl = document.getElementById('save-error-message');
+      if (errEl && msgEl) {
+        msgEl.textContent = message;
+        errEl.style.display = 'block';
+      }
+    }
+    function hideSaveError() {
+      const errEl = document.getElementById('save-error');
+      if (errEl) errEl.style.display = 'none';
+    }
+
+    async function runSaveToCrm() {
       const btn = document.getElementById('save-to-crm');
       const addressValue = addressInput.value.trim();
 
@@ -2020,6 +2072,7 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
         }
       }
 
+      hideSaveError();
       btn.disabled = true;
       btn.textContent = 'Saving...';
       try {
@@ -2059,17 +2112,24 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
         }
         if (res.success) {
           btn.textContent = 'Saved to CRM';
+          hideSaveError();
         } else {
-          alert('Failed to save: ' + (res.error || 'Unknown error'));
+          const msg = (res.error === 'AUTH_EXPIRED' || res.error === 'NOT_AUTHENTICATED')
+            ? 'Session expired before save completed. After signing in again, click Retry Save (your review and decisions are preserved).'
+            : 'Failed to save: ' + (res.error || 'Unknown error');
+          showSaveError(msg);
           btn.disabled = false;
           btn.textContent = 'Save to CRM';
         }
       } catch (err) {
-        alert('Error: ' + err.message);
+        showSaveError('Error during save: ' + err.message);
         btn.disabled = false;
         btn.textContent = 'Save to CRM';
       }
-    });
+    }
+
+    document.getElementById('save-to-crm').addEventListener('click', () => { runSaveToCrm(); });
+    document.getElementById('save-retry-btn').addEventListener('click', () => { runSaveToCrm(); });
 
     // Mission 7.2 Phase B: extracted from #start-new so the logout handler
     // can reset to the same blank slate before showing the login screen.
@@ -2087,6 +2147,8 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       v4Result = null;
       v4Decisions = { bucketDecisions: {}, itemDecisions: {}, itemSkipped: {} };
       v4SessionId = null;
+      // v1.2.2 — clear any leftover save-error block so a New Review starts clean
+      hideSaveError();
 
       // Reset PDF state
       currentPdfPath = null;
