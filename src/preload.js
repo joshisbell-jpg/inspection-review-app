@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('api', {
   // Send inspection data + results to KeepSimpleCRM
   sendToCrm: (data) => ipcRenderer.invoke('send-to-crm', data),
 
+  // Send V4 review (Mission 9 Phase B.2 / Mission 7.2 Phase C). V4 has its
+  // own decision map shape (bucketDecisions / itemDecisions / itemSkipped)
+  // and goes to /api/inspections/v4/save instead of /api/inspections/ai-review.
+  sendV4ToCrm: (data) => ipcRenderer.invoke('send-v4-to-crm', data),
+
   // Listen for progress updates
   onProgress: (callback) => {
     ipcRenderer.on('progress', (event, data) => callback(data));

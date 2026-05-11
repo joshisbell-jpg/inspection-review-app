@@ -400,6 +400,49 @@
     .summary-dot.skip { background: var(--text-tertiary); }
     .summary-dot.unreviewed { background: var(--border); }
     .summary-progress { font-size: 13px; color: var(--text-secondary); }
+
+    /* ----- Mission 7.2 Phase C / Mission 9 Phase B.2 — V4 multi-bucket renderer ----- */
+    .v4-bucket-section { margin-top: 24px; }
+    .v4-bucket-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; font-size: 16px; font-weight: 600; margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .v4-bucket-cascade { display: flex; gap: 6px; }
+    .v4-bucket-cascade .decision-btn { font-size: 12px; padding: 4px 10px; border-width: 1px; }
+    .v4-subsection {
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 12px; margin-bottom: 12px; background: var(--bg-secondary);
+    }
+    .v4-subsection-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; font-size: 14px; font-weight: 600; margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .v4-group-header {
+      font-size: 13px; font-weight: 500; color: var(--text-secondary);
+      margin-top: 12px; margin-bottom: 6px;
+    }
+    .v4-cascaded-hint {
+      font-size: 12px; color: var(--text-tertiary); font-style: italic;
+      align-self: flex-start; padding-top: 4px; flex-shrink: 0;
+    }
+    .issue-item.v4-flagged {
+      border-left: 3px solid var(--danger); padding-left: 13px;
+    }
+    .v4-flag-icon-wrap {
+      display: inline-flex; align-items: center; margin-left: 6px;
+      color: var(--danger); cursor: help; vertical-align: middle;
+    }
+    .v4-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .v4-page-refs { color: var(--text-tertiary); font-size: 12px; }
+    .v4-new-badge { color: var(--danger); font-weight: 600; font-size: 12px; }
+    .v4-pre-badge { color: var(--accent); font-size: 12px; }
+    .v4-utility-banner {
+      background: var(--warning-bg); color: var(--warning);
+      border: 1px solid var(--warning); border-radius: var(--radius);
+      padding: 10px 14px; margin-bottom: 16px; font-size: 14px; font-weight: 500;
+    }
     
     .action-buttons { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
 
@@ -708,6 +751,15 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     //     results._displayShape.issues with each row carrying `_v3Id` for back-mapping.
     // displayIssues unifies the two so the renderer/save-to-crm logic can stay format-agnostic.
     let displayIssues = [];
+
+    // V4 state (Mission 9 Phase B.2 / Mission 7.2 Phase C — vanilla-JS port of
+    // web V4ReviewDisplay). v4Result is the V4IssuesBlob from /api/inspections/v4/run;
+    // v4Decisions mirrors web's V4DecisionMap (bucketDecisions / itemDecisions /
+    // itemSkipped). v4SessionId is minted at processInspections start so the
+    // server-side /v4/save audit row can correlate this client session.
+    let v4Result = null;
+    let v4Decisions = { bucketDecisions: {}, itemDecisions: {}, itemSkipped: {} };
+    let v4SessionId = null;
     
     const currentLinkInput = document.getElementById('current-link');
     const previousLinksInput = document.getElementById('previous-links');
@@ -857,6 +909,19 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       const hasCurrentUrl = currentLink.startsWith('http');
       const hasCurrentPdf = !!currentPdfPath;
       if (!hasCurrentUrl && !hasCurrentPdf) return;
+
+      // Mint a session id for V4 saves. The /v4/save audit row carries this so
+      // the server can correlate each save with its originating client run.
+      // crypto.randomUUID is available in Electron's renderer (Node ≥ 14.17 /
+      // Chromium ≥ 92); no preload bridge needed.
+      v4SessionId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = (Math.random() * 16) | 0;
+            return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+          }));
+      // Fresh decision map per run.
+      v4Decisions = { bucketDecisions: {}, itemDecisions: {}, itemSkipped: {} };
 
       // Combine all previous sources for counting
       const prevUrlCount = previousLinks.length;
@@ -1039,9 +1104,516 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       else if (status === 'error') icon.innerHTML = '✗';
     }
     
+    // ========================================================================
+    // V4 renderer (Mission 7.2 Phase C / Mission 9 Phase B.2) — vanilla-JS port
+    // of web V4ReviewDisplay. 8 buckets × 3 approval modes (single, per_item,
+    // mixed) plus Photo Review flag surfaces. Reuses .decision-btn / .issue-item
+    // CSS; new V4-specific classes added in the <style> block above.
+    //
+    // State model — mirror of V4DecisionMap in web v4-review-session.tsx:
+    //   v4Decisions.bucketDecisions[compositeKey] for single-approval cascades:
+    //     - bucketKey alone for whole-bucket single-approval (cleaning, ...)
+    //     - `${bucketKey}::${subsectionKey}` for mixed-bucket single subsections
+    //   v4Decisions.itemDecisions[issueId] for per-item liability
+    //   v4Decisions.itemSkipped[issueId] orthogonal to liability; UX mutex
+    //     (selecting one clears the other) is enforced in setV4ItemDecision /
+    //     toggleV4ItemSkipped to mirror the web component contract.
+    //
+    // Every mutation triggers a full re-render. Wickiup-class V4 (~150 issues
+    // across 8 buckets) renders well under 50ms; the targeted-DOM-mutation
+    // alternative would have to track every button instance for cascade-flip,
+    // which is what the React reconciler did for free in the web port.
+    // ========================================================================
+
+    function v4FlagIcon(reason, pageRefs) {
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const span = document.createElement('span');
+      span.className = 'v4-flag-icon-wrap';
+      const pageHint = (pageRefs && pageRefs.length > 0) ? ' — Check PDF page ' + pageRefs[0] : '';
+      span.title = (reason || 'Photo review required') + pageHint;
+      span.setAttribute('aria-label', 'Flagged for photo review');
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('width', '14');
+      svg.setAttribute('height', '14');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('fill', 'none');
+      svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '2');
+      svg.setAttribute('stroke-linecap', 'round');
+      svg.setAttribute('stroke-linejoin', 'round');
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', 'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z');
+      svg.appendChild(path);
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', '4');
+      line.setAttribute('y1', '22');
+      line.setAttribute('x2', '4');
+      line.setAttribute('y2', '15');
+      svg.appendChild(line);
+      span.appendChild(svg);
+      return span;
+    }
+
+    function setV4BucketDecision(compositeKey, liability) {
+      if (liability === null || v4Decisions.bucketDecisions[compositeKey] === liability) {
+        delete v4Decisions.bucketDecisions[compositeKey];
+      } else {
+        v4Decisions.bucketDecisions[compositeKey] = liability;
+      }
+      renderV4Results(results, currentContext);
+    }
+
+    function setV4ItemDecision(issueId, liability) {
+      if (liability === null) {
+        delete v4Decisions.itemDecisions[issueId];
+      } else if (v4Decisions.itemDecisions[issueId] === liability && !v4Decisions.itemSkipped[issueId]) {
+        delete v4Decisions.itemDecisions[issueId];
+      } else {
+        v4Decisions.itemDecisions[issueId] = liability;
+        delete v4Decisions.itemSkipped[issueId]; // Skip mutex
+      }
+      renderV4Results(results, currentContext);
+    }
+
+    function toggleV4ItemSkipped(issueId) {
+      if (v4Decisions.itemSkipped[issueId]) {
+        delete v4Decisions.itemSkipped[issueId];
+      } else {
+        v4Decisions.itemSkipped[issueId] = true;
+        delete v4Decisions.itemDecisions[issueId]; // Skip mutex
+      }
+      renderV4Results(results, currentContext);
+    }
+
+    function renderV4IssueLi(issue, opts) {
+      const cascadedFromBucket = !!(opts && opts.cascadedFromBucket);
+      const li = document.createElement('li');
+      li.className = 'issue-item';
+      if (issue.flaggedForPhotoReview) li.classList.add('v4-flagged');
+
+      const topRow = document.createElement('div');
+      topRow.className = 'issue-top';
+
+      const content = document.createElement('div');
+      content.className = 'issue-content';
+
+      const loc = document.createElement('div');
+      loc.className = 'issue-location';
+      loc.appendChild(document.createTextNode(issue.room + (issue.area ? ' / ' + issue.area : '')));
+      if (issue.flaggedForPhotoReview) {
+        loc.appendChild(v4FlagIcon(issue.photoReviewReason, issue.pageReferences));
+      }
+      content.appendChild(loc);
+
+      const desc = document.createElement('div');
+      desc.className = 'issue-description';
+      desc.textContent = issue.description;
+      content.appendChild(desc);
+
+      const meta = document.createElement('div');
+      meta.className = 'v4-meta';
+      if (issue.severity) {
+        const sev = document.createElement('span');
+        sev.className = 'severity-badge ' + issue.severity;
+        sev.textContent = issue.severity;
+        meta.appendChild(sev);
+      }
+      const newBadge = document.createElement('span');
+      if (issue.isNewSinceMoveIn) {
+        newBadge.className = 'v4-new-badge';
+        newBadge.textContent = 'NEW';
+      } else {
+        newBadge.className = 'v4-pre-badge';
+        newBadge.textContent = 'Pre-existing';
+      }
+      meta.appendChild(newBadge);
+      if (issue.pageReferences && issue.pageReferences.length > 0) {
+        const pr = document.createElement('span');
+        pr.className = 'v4-page-refs';
+        pr.textContent = issue.pageReferences.length === 1
+          ? 'Page ' + issue.pageReferences[0]
+          : 'Pages ' + issue.pageReferences.join(', ');
+        meta.appendChild(pr);
+      }
+      content.appendChild(meta);
+
+      if (issue.moveInNote) {
+        const mn = document.createElement('div');
+        mn.className = 'issue-meta';
+        mn.style.fontStyle = 'italic';
+        mn.textContent = 'Move-in note: ' + issue.moveInNote;
+        content.appendChild(mn);
+      }
+
+      topRow.appendChild(content);
+
+      if (cascadedFromBucket) {
+        const hint = document.createElement('div');
+        hint.className = 'v4-cascaded-hint';
+        hint.textContent = 'Cascaded from bucket';
+        topRow.appendChild(hint);
+      } else {
+        const btns = document.createElement('div');
+        btns.className = 'decision-buttons';
+        const currentLiability = v4Decisions.itemDecisions[issue.id];
+        const isSkipped = !!v4Decisions.itemSkipped[issue.id];
+
+        function makeLiabBtn(label, value, selectedClass) {
+          const btn = document.createElement('button');
+          btn.className = 'decision-btn';
+          if (currentLiability === value && !isSkipped) btn.classList.add(selectedClass);
+          btn.textContent = label;
+          btn.addEventListener('click', () => setV4ItemDecision(issue.id, value));
+          return btn;
+        }
+        btns.appendChild(makeLiabBtn('Tenant', 'tenant', 'selected-tenant'));
+        btns.appendChild(makeLiabBtn('Owner', 'owner', 'selected-owner'));
+        btns.appendChild(makeLiabBtn('Review', 'normal_wear', 'selected-wear'));
+
+        const skipBtn = document.createElement('button');
+        skipBtn.className = 'decision-btn';
+        if (isSkipped) skipBtn.classList.add('selected-skip');
+        skipBtn.textContent = 'Skip';
+        skipBtn.addEventListener('click', () => toggleV4ItemSkipped(issue.id));
+        btns.appendChild(skipBtn);
+
+        topRow.appendChild(btns);
+      }
+
+      li.appendChild(topRow);
+      return li;
+    }
+
+    function renderV4CascadeButtons(compositeKey) {
+      const wrap = document.createElement('div');
+      wrap.className = 'v4-bucket-cascade';
+      const current = v4Decisions.bucketDecisions[compositeKey] || null;
+      function mkBtn(label, value, selectedClass) {
+        const btn = document.createElement('button');
+        btn.className = 'decision-btn';
+        if (current === value) btn.classList.add(selectedClass);
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          setV4BucketDecision(compositeKey, current === value ? null : value);
+        });
+        return btn;
+      }
+      wrap.appendChild(mkBtn('Tenant', 'tenant', 'selected-tenant'));
+      wrap.appendChild(mkBtn('Owner', 'owner', 'selected-owner'));
+      wrap.appendChild(mkBtn('Review', 'normal_wear', 'selected-wear'));
+      return wrap;
+    }
+
+    function renderV4SingleBucket(container, bucket) {
+      const sec = document.createElement('div');
+      sec.className = 'v4-bucket-section';
+      const header = document.createElement('div');
+      header.className = 'v4-bucket-header';
+      const title = document.createElement('span');
+      title.textContent = bucket.bucketLabel + ' (' + bucket.issues.length + ' ' + (bucket.issues.length === 1 ? 'issue' : 'issues') + ')';
+      header.appendChild(title);
+      header.appendChild(renderV4CascadeButtons(bucket.bucketKey));
+      sec.appendChild(header);
+
+      const list = document.createElement('ul');
+      list.className = 'issue-list';
+      for (const issue of bucket.issues) {
+        list.appendChild(renderV4IssueLi(issue, { cascadedFromBucket: true }));
+      }
+      sec.appendChild(list);
+      container.appendChild(sec);
+    }
+
+    function renderV4PerItemBucket(container, bucket) {
+      const sec = document.createElement('div');
+      sec.className = 'v4-bucket-section';
+      const totalIssues = bucket.groups.reduce((s, g) => s + g.issues.length, 0);
+      const header = document.createElement('div');
+      header.className = 'v4-bucket-header';
+      const title = document.createElement('span');
+      title.textContent = bucket.bucketLabel + ' (' + totalIssues + ' ' + (totalIssues === 1 ? 'issue' : 'issues') + ')';
+      header.appendChild(title);
+      sec.appendChild(header);
+
+      for (const group of bucket.groups) {
+        if (!group.issues || group.issues.length === 0) continue;
+        const gh = document.createElement('div');
+        gh.className = 'v4-group-header';
+        gh.textContent = group.groupLabel + ' (' + group.issues.length + ')';
+        sec.appendChild(gh);
+        const list = document.createElement('ul');
+        list.className = 'issue-list';
+        for (const issue of group.issues) {
+          list.appendChild(renderV4IssueLi(issue));
+        }
+        sec.appendChild(list);
+      }
+      container.appendChild(sec);
+    }
+
+    function renderV4MixedBucket(container, bucket) {
+      const sec = document.createElement('div');
+      sec.className = 'v4-bucket-section';
+      const totalIssues = bucket.subsections.reduce((s, sub) => {
+        if (sub.approvalMode === 'single') return s + sub.issues.length;
+        return s + sub.groups.reduce((g, gp) => g + gp.issues.length, 0);
+      }, 0);
+      const header = document.createElement('div');
+      header.className = 'v4-bucket-header';
+      const title = document.createElement('span');
+      title.textContent = bucket.bucketLabel + ' (' + totalIssues + ' ' + (totalIssues === 1 ? 'issue' : 'issues') + ')';
+      header.appendChild(title);
+      sec.appendChild(header);
+
+      for (const sub of bucket.subsections) {
+        const subEl = document.createElement('div');
+        subEl.className = 'v4-subsection';
+        if (sub.approvalMode === 'single') {
+          const compositeKey = bucket.bucketKey + '::' + sub.subsectionKey;
+          const subHeader = document.createElement('div');
+          subHeader.className = 'v4-subsection-header';
+          const subTitle = document.createElement('span');
+          subTitle.textContent = sub.subsectionLabel + ' (' + sub.issues.length + ' ' + (sub.issues.length === 1 ? 'issue' : 'issues') + ')';
+          subHeader.appendChild(subTitle);
+          subHeader.appendChild(renderV4CascadeButtons(compositeKey));
+          subEl.appendChild(subHeader);
+          const list = document.createElement('ul');
+          list.className = 'issue-list';
+          for (const issue of sub.issues) {
+            list.appendChild(renderV4IssueLi(issue, { cascadedFromBucket: true }));
+          }
+          subEl.appendChild(list);
+        } else {
+          const subHeader = document.createElement('div');
+          subHeader.className = 'v4-subsection-header';
+          const totalSubIssues = sub.groups.reduce((s, g) => s + g.issues.length, 0);
+          const subTitle = document.createElement('span');
+          subTitle.textContent = sub.subsectionLabel + ' (' + totalSubIssues + ' ' + (totalSubIssues === 1 ? 'issue' : 'issues') + ')';
+          subHeader.appendChild(subTitle);
+          subEl.appendChild(subHeader);
+          for (const group of sub.groups) {
+            if (!group.issues || group.issues.length === 0) continue;
+            const gh = document.createElement('div');
+            gh.className = 'v4-group-header';
+            gh.textContent = group.groupLabel + ' (' + group.issues.length + ')';
+            subEl.appendChild(gh);
+            const list = document.createElement('ul');
+            list.className = 'issue-list';
+            for (const issue of group.issues) {
+              list.appendChild(renderV4IssueLi(issue));
+            }
+            subEl.appendChild(list);
+          }
+        }
+        sec.appendChild(subEl);
+      }
+      container.appendChild(sec);
+    }
+
+    function renderV4Bucket(container, bucket) {
+      switch (bucket.approvalMode) {
+        case 'single': return renderV4SingleBucket(container, bucket);
+        case 'per_item': return renderV4PerItemBucket(container, bucket);
+        case 'mixed': return renderV4MixedBucket(container, bucket);
+        default: return; // unknown approvalMode — silently skip
+      }
+    }
+
+    function renderV4UtilityBanner(utilityStatus) {
+      if (!utilityStatus) return null;
+      const off = ['water', 'power', 'gas'].filter((k) => utilityStatus[k] === 'off');
+      if (off.length === 0) return null;
+      const banner = document.createElement('div');
+      banner.className = 'v4-utility-banner';
+      const labels = off.map((k) => k.charAt(0).toUpperCase() + k.slice(1));
+      banner.textContent = '⚠️ ' + labels.join(', ') + ' OFF at this property — confirm in your inspection workflow.';
+      return banner;
+    }
+
+    function v4Counts() {
+      // Item-level counts. Cascade applies bucket/subsection decision to each
+      // member issue; Skip mutex means a skipped item doesn't double-count.
+      const counts = { tenant: 0, owner: 0, normal_wear: 0, unassigned: 0, skipped: 0, total: 0 };
+      function processSingleApproval(items, decision) {
+        for (const issue of items) {
+          counts.total += 1;
+          if (v4Decisions.itemSkipped[issue.id]) { counts.skipped += 1; continue; }
+          if (decision) counts[decision] += 1;
+          else counts.unassigned += 1;
+        }
+      }
+      function processPerItem(groups) {
+        for (const group of groups) {
+          for (const issue of group.issues) {
+            counts.total += 1;
+            if (v4Decisions.itemSkipped[issue.id]) { counts.skipped += 1; continue; }
+            const dec = v4Decisions.itemDecisions[issue.id];
+            if (dec) counts[dec] += 1;
+            else counts.unassigned += 1;
+          }
+        }
+      }
+      for (const bucket of v4Result.buckets) {
+        if (bucket.approvalMode === 'single') {
+          processSingleApproval(bucket.issues, v4Decisions.bucketDecisions[bucket.bucketKey] || null);
+        } else if (bucket.approvalMode === 'per_item') {
+          processPerItem(bucket.groups);
+        } else if (bucket.approvalMode === 'mixed') {
+          for (const sub of bucket.subsections) {
+            if (sub.approvalMode === 'single') {
+              const ck = bucket.bucketKey + '::' + sub.subsectionKey;
+              processSingleApproval(sub.issues, v4Decisions.bucketDecisions[ck] || null);
+            } else {
+              processPerItem(sub.groups);
+            }
+          }
+        }
+      }
+      return counts;
+    }
+
+    function v4FlattenWithDecisions() {
+      // Returns [{ issue, decision }] with cascade applied. decision values
+      // mirror legacy V2/V3 reviewDecisions vocabulary so the email/JSON
+      // exporters can reuse the same labels: 'tenant' | 'owner' | 'wear' (=
+      // normal_wear) | 'skip' | 'unreviewed'.
+      const out = [];
+      function liabToLegacy(liab, isSkipped) {
+        if (isSkipped) return 'skip';
+        if (liab === 'normal_wear') return 'wear';
+        if (liab === 'tenant' || liab === 'owner') return liab;
+        return 'unreviewed';
+      }
+      function pushSingle(items, dec) {
+        for (const issue of items) {
+          out.push({ issue, decision: liabToLegacy(dec, !!v4Decisions.itemSkipped[issue.id]) });
+        }
+      }
+      function pushPerItem(groups) {
+        for (const group of groups) {
+          for (const issue of group.issues) {
+            out.push({
+              issue,
+              decision: liabToLegacy(v4Decisions.itemDecisions[issue.id], !!v4Decisions.itemSkipped[issue.id]),
+            });
+          }
+        }
+      }
+      for (const bucket of v4Result.buckets) {
+        if (bucket.approvalMode === 'single') {
+          pushSingle(bucket.issues, v4Decisions.bucketDecisions[bucket.bucketKey] || null);
+        } else if (bucket.approvalMode === 'per_item') {
+          pushPerItem(bucket.groups);
+        } else if (bucket.approvalMode === 'mixed') {
+          for (const sub of bucket.subsections) {
+            if (sub.approvalMode === 'single') {
+              const ck = bucket.bucketKey + '::' + sub.subsectionKey;
+              pushSingle(sub.issues, v4Decisions.bucketDecisions[ck] || null);
+            } else {
+              pushPerItem(sub.groups);
+            }
+          }
+        }
+      }
+      return out;
+    }
+
+    function updateV4ReviewSummary() {
+      const summaryDiv = document.getElementById('review-summary');
+      if (!summaryDiv) return;
+      summaryDiv.textContent = '';
+
+      const c = v4Counts();
+      const title = document.createElement('h3');
+      title.textContent = 'Review Progress';
+      summaryDiv.appendChild(title);
+
+      const countsDiv = document.createElement('div');
+      countsDiv.className = 'summary-counts';
+      function addCount(label, count, dotClass) {
+        const item = document.createElement('div');
+        item.className = 'summary-count';
+        const dot = document.createElement('span');
+        dot.className = 'summary-dot ' + dotClass;
+        item.appendChild(dot);
+        const text = document.createElement('span');
+        text.textContent = count + ' ' + label;
+        item.appendChild(text);
+        countsDiv.appendChild(item);
+      }
+      addCount('Tenant', c.tenant, 'tenant');
+      addCount('Owner', c.owner, 'owner');
+      addCount('Review', c.normal_wear, 'wear');
+      addCount('Skipped', c.skipped, 'skip');
+      addCount('Unassigned', c.unassigned, 'unreviewed');
+      summaryDiv.appendChild(countsDiv);
+
+      const reviewed = c.total - c.unassigned;
+      const progress = document.createElement('div');
+      progress.className = 'summary-progress';
+      progress.textContent = reviewed + ' of ' + c.total + ' items resolved';
+      summaryDiv.appendChild(progress);
+    }
+
+    function renderV4Results(resultsArg, _contextArg) {
+      v4Result = resultsArg.issues;
+      resultsContainer.textContent = '';
+
+      const header = document.createElement('div');
+      header.style.marginBottom = '16px';
+      const condSpan = document.createElement('span');
+      condSpan.style.cssText = 'font-size:18px;font-weight:600';
+      condSpan.textContent = 'V4 Multi-bucket Review';
+      header.appendChild(condSpan);
+
+      if (resultsArg._serverParseStats) {
+        const stats = document.createElement('p');
+        stats.style.cssText = 'color:var(--text-secondary);margin-top:4px;font-size:13px';
+        const ps = resultsArg._serverParseStats;
+        const tu = resultsArg._serverTokenUsage;
+        let line = ps.pages + ' pages · ' + ps.chars.toLocaleString() + ' chars';
+        if (tu && tu.input != null && tu.output != null) {
+          line += ' · ' + tu.input.toLocaleString() + ' in / ' + tu.output.toLocaleString() + ' out tokens';
+        }
+        stats.textContent = line;
+        header.appendChild(stats);
+      }
+      resultsContainer.appendChild(header);
+
+      const banner = renderV4UtilityBanner(v4Result.utilityStatus);
+      if (banner) resultsContainer.appendChild(banner);
+
+      const issuesTitle = document.createElement('h3');
+      issuesTitle.style.cssText = 'font-size:16px;margin-bottom:4px;margin-top:16px';
+      issuesTitle.textContent = 'Issues by Bucket (' + v4Result.totalIssues + ')';
+      resultsContainer.appendChild(issuesTitle);
+      const issuesHelp = document.createElement('p');
+      issuesHelp.style.cssText = 'font-size:13px;color:var(--text-tertiary);margin-bottom:12px';
+      issuesHelp.textContent = 'Single-approval buckets cascade one decision to every member issue. Per-item buckets get a decision per issue. Skip is mutually exclusive with liability.';
+      resultsContainer.appendChild(issuesHelp);
+
+      for (const bucket of v4Result.buckets) {
+        renderV4Bucket(resultsContainer, bucket);
+      }
+
+      const summaryDiv = document.createElement('div');
+      summaryDiv.className = 'review-summary';
+      summaryDiv.id = 'review-summary';
+      resultsContainer.appendChild(summaryDiv);
+      updateV4ReviewSummary();
+    }
+
     function showResults(results, context) {
       progressSection.classList.remove('active');
       resultsSection.classList.add('active');
+
+      // V4 dispatch — V4 has its own renderer / decision model; no displayIssues
+      // or flat reviewDecisions array. Save-to-CRM and email handlers branch
+      // on results.format === 'v4' and read v4Result + v4Decisions instead.
+      if (results && results.format === 'v4') {
+        renderV4Results(results, context);
+        return;
+      }
 
       // Resolve the display array based on emission format. V3 carries it on _displayShape;
       // V2 keeps it at the top level. Both feed the same renderer.
@@ -1330,7 +1902,16 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       return displayIssues.filter((_, idx) => reviewDecisions[idx] === decision);
     }
 
+    function isV4() { return !!(results && results.format === 'v4' && v4Result); }
+
     function checkReviewComplete() {
+      if (isV4()) {
+        const c = v4Counts();
+        if (c.unassigned > 0) {
+          return confirm(c.unassigned + ' item(s) still unassigned. Continue anyway?');
+        }
+        return true;
+      }
       const unreviewed = reviewDecisions.filter(d => d === null).length;
       if (unreviewed > 0) {
         return confirm(unreviewed + ' issue(s) still unreviewed. Continue anyway?');
@@ -1338,11 +1919,20 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       return true;
     }
 
+    function v4FilterByDecision(decisionLegacy) {
+      // decisionLegacy ∈ {'tenant','owner','wear','skip'}
+      return v4FlattenWithDecisions()
+        .filter((row) => row.decision === decisionLegacy)
+        .map((row) => row.issue);
+    }
+
     document.getElementById('copy-owner-email').addEventListener('click', () => {
       if (!checkReviewComplete()) return;
-      const tenantItems = getReviewedIssues('tenant');
-      const ownerItems = getReviewedIssues('owner');
-      let email = 'Subject: Inspection Summary\n\nHi,\n\nMove-out inspection complete. Overall: ' + (results.overall_condition || 'fair') + ' condition.\n\n' + (results.summary || '');
+      const tenantItems = isV4() ? v4FilterByDecision('tenant') : getReviewedIssues('tenant');
+      const ownerItems = isV4() ? v4FilterByDecision('owner') : getReviewedIssues('owner');
+      const overall = isV4() ? 'reviewed' : (results.overall_condition || 'fair');
+      const summaryText = isV4() ? '' : (results.summary || '');
+      let email = 'Subject: Inspection Summary\n\nHi,\n\nMove-out inspection complete. Overall: ' + overall + ' condition.\n\n' + summaryText;
       email += '\n\nTenant-Responsible Items (' + tenantItems.length + '):\n';
       email += tenantItems.length > 0 ? tenantItems.map(i => '- ' + i.room + (i.area ? ' - ' + i.area : '') + ': ' + i.description).join('\n') : '- None';
       email += '\n\nOwner/Maintenance Items (' + ownerItems.length + '):\n';
@@ -1354,8 +1944,10 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
 
     document.getElementById('copy-tenant-email').addEventListener('click', () => {
       if (!checkReviewComplete()) return;
-      const tenantItems = getReviewedIssues('tenant');
-      let email = 'Subject: Move-Out Inspection Results\n\nDear Tenant,\n\nYour move-out inspection has been completed. Overall condition: ' + (results.overall_condition || 'N/A') + '.\n\n' + (results.summary || '');
+      const tenantItems = isV4() ? v4FilterByDecision('tenant') : getReviewedIssues('tenant');
+      const overall = isV4() ? 'reviewed' : (results.overall_condition || 'N/A');
+      const summaryText = isV4() ? '' : (results.summary || '');
+      let email = 'Subject: Move-Out Inspection Results\n\nDear Tenant,\n\nYour move-out inspection has been completed. Overall condition: ' + overall + '.\n\n' + summaryText;
       if (tenantItems.length > 0) {
         email += '\n\nItems identified as tenant responsibility:\n';
         email += tenantItems.map((i, n) => (n + 1) + '. ' + i.room + (i.area ? ' - ' + i.area : '') + ': ' + i.description).join('\n');
@@ -1368,23 +1960,47 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
     });
 
     document.getElementById('export-json').addEventListener('click', () => {
-      const exportData = {
-        ai_findings: results,
-        reviewer_decisions: displayIssues.map((issue, idx) => ({
-          issue_number: idx + 1,
-          room: issue.room,
-          area: issue.area,
-          description: issue.description,
-          decision: reviewDecisions[idx] || 'unreviewed',
-        })),
-        summary: {
-          tenant: getReviewedIssues('tenant').length,
-          owner: getReviewedIssues('owner').length,
-          normal_wear: getReviewedIssues('wear').length,
-          skipped: getReviewedIssues('skip').length,
-          unreviewed: reviewDecisions.filter(d => d === null).length,
-        },
-      };
+      let exportData;
+      if (isV4()) {
+        const flat = v4FlattenWithDecisions();
+        const c = v4Counts();
+        exportData = {
+          ai_findings: { format: 'v4', issues: v4Result },
+          reviewer_decisions: flat.map((row, idx) => ({
+            issue_number: idx + 1,
+            issue_id: row.issue.id,
+            room: row.issue.room,
+            area: row.issue.area,
+            description: row.issue.description,
+            decision: row.decision,
+          })),
+          summary: {
+            tenant: c.tenant,
+            owner: c.owner,
+            normal_wear: c.normal_wear,
+            skipped: c.skipped,
+            unassigned: c.unassigned,
+          },
+        };
+      } else {
+        exportData = {
+          ai_findings: results,
+          reviewer_decisions: displayIssues.map((issue, idx) => ({
+            issue_number: idx + 1,
+            room: issue.room,
+            area: issue.area,
+            description: issue.description,
+            decision: reviewDecisions[idx] || 'unreviewed',
+          })),
+          summary: {
+            tenant: getReviewedIssues('tenant').length,
+            owner: getReviewedIssues('owner').length,
+            normal_wear: getReviewedIssues('wear').length,
+            skipped: getReviewedIssues('skip').length,
+            unreviewed: reviewDecisions.filter(d => d === null).length,
+          },
+        };
+      }
       const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -1407,18 +2023,40 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       btn.disabled = true;
       btn.textContent = 'Saving...';
       try {
-        const res = await window.api.sendToCrm({
-          currentInspection: currentInspection,
-          previousInspections: prevInspections || [],
-          context: { ...(currentContext || {}), address: addressValue },
-          result: results,
-          reviewerDecisions: displayIssues.map((issue, idx) => ({
-            issue_number: idx + 1,
-            room: issue.room,
-            area: issue.area,
-            decision: reviewDecisions[idx] || 'unreviewed',
-          })),
-        });
+        let res;
+        if (isV4()) {
+          // V4 path — Mission 7.2 Phase C / Mission 9 Phase B.2 Sub-Batch C.
+          // Routes to /api/inspections/v4/save with V4DecisionMap. The server
+          // applies cascade + skip mutex via applyV4Decisions and persists the
+          // merged blob; client just hands over the unmerged decision map.
+          res = await window.api.sendV4ToCrm({
+            sessionId: v4SessionId,
+            v4Result: v4Result,
+            decisions: v4Decisions,
+            propertyAddress: addressValue,
+            addressSource: results._serverAddressSource || 'caller',
+            parseStats: results._serverParseStats || { pages: 0, chars: 0 },
+            tokenUsage: results._serverTokenUsage || null,
+            context: {
+              unit: (currentContext && currentContext.unit) || (currentInspection.property && currentInspection.property.unit) || undefined,
+              tenant: (currentContext && currentContext.tenant) || (currentInspection.property && currentInspection.property.tenant) || undefined,
+              leaseDuration: (currentContext && currentContext.leaseDuration) || undefined,
+            },
+          });
+        } else {
+          res = await window.api.sendToCrm({
+            currentInspection: currentInspection,
+            previousInspections: prevInspections || [],
+            context: { ...(currentContext || {}), address: addressValue },
+            result: results,
+            reviewerDecisions: displayIssues.map((issue, idx) => ({
+              issue_number: idx + 1,
+              room: issue.room,
+              area: issue.area,
+              decision: reviewDecisions[idx] || 'unreviewed',
+            })),
+          });
+        }
         if (res.success) {
           btn.textContent = 'Saved to CRM';
         } else {
@@ -1444,6 +2082,11 @@ https://isbellrentals.appfolio.com/inspections/5890"></textarea>
       currentLink = '';
       previousLinks = [];
       reviewDecisions = [];
+      // V4 state — clear bucket / item decision maps + invalidate session id so
+      // the next processInspections run mints a fresh one.
+      v4Result = null;
+      v4Decisions = { bucketDecisions: {}, itemDecisions: {}, itemSkipped: {} };
+      v4SessionId = null;
 
       // Reset PDF state
       currentPdfPath = null;

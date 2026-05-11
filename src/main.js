@@ -977,6 +977,108 @@ ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspect
   }
 });
 
+/**
+ * V4 save (Mission 7.2 Phase C / Mission 9 Phase B.2 Sub-Batch C). Routes the
+ * client's V4DecisionMap to /api/inspections/v4/save instead of /api/inspections/
+ * ai-review. The server applies cascade + skip-mutex via applyV4Decisions and
+ * persists the merged blob; we just hand over the unmerged decision map plus
+ * the V4IssuesBlob the user reviewed.
+ *
+ * Auth: per-user Bearer key from credentialStore (same pattern as runV4ViaServer
+ * and the legacy send-to-crm). 401 wipes credentials + emits auth-expired so
+ * the renderer drops back to login screen WITHOUT clearing in-memory inspection
+ * state (user can re-login and click Save to CRM again with decisions intact —
+ * see B6 onAuthExpired contract).
+ *
+ * Returns same shape as send-to-crm: {success, data?, error?} so the renderer
+ * dispatch is symmetrical.
+ */
+ipcMain.handle('send-v4-to-crm', async (event, payload) => {
+  try {
+    const creds = await credentialStore.readCredentials();
+    if (!creds) {
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'NOT_AUTHENTICATED' };
+    }
+
+    // Validate the minimum payload shape — sessionId / v4Result / decisions
+    // are required; everything else is optional. The server runs full Zod
+    // validation, but we surface client-side mistakes with a clear error
+    // before round-tripping to the network.
+    if (!payload || typeof payload !== 'object') {
+      return { success: false, error: 'V4 save payload missing' };
+    }
+    const { sessionId, v4Result, decisions, propertyAddress, addressSource,
+      parseStats, tokenUsage, context } = payload;
+    if (!sessionId || typeof sessionId !== 'string') {
+      return { success: false, error: 'V4 save: sessionId missing' };
+    }
+    if (!v4Result || v4Result.formatVersion !== 'v4' || !Array.isArray(v4Result.buckets)) {
+      return { success: false, error: 'V4 save: v4Result missing or wrong format' };
+    }
+    if (!decisions || typeof decisions !== 'object'
+        || typeof decisions.bucketDecisions !== 'object'
+        || typeof decisions.itemDecisions !== 'object'
+        || typeof decisions.itemSkipped !== 'object') {
+      return { success: false, error: 'V4 save: decisions map malformed' };
+    }
+
+    const body = {
+      sessionId,
+      v4Result,
+      decisions,
+      propertyAddress: propertyAddress || '',
+      addressSource: addressSource || 'caller',
+      parseStats: parseStats || { pages: 0, chars: 0 },
+    };
+    if (tokenUsage) body.tokenUsage = tokenUsage;
+    if (context && Object.keys(context).length > 0) body.context = context;
+    // Electron heavy-PDF flow has no blob URL — PDF stays on user's machine.
+    // primaryBlobUrl / comparisonBlobUrls are optional in v4SaveBodySchema, so
+    // we omit them entirely.
+
+    const debug = process.env.AI_REVIEW_DEBUG === 'true';
+    if (debug) {
+      console.log(`[v4-save] sessionId=${sessionId} buckets=${v4Result.buckets.length} ` +
+        `bucketDecisions=${Object.keys(decisions.bucketDecisions).length} ` +
+        `itemDecisions=${Object.keys(decisions.itemDecisions).length} ` +
+        `itemSkipped=${Object.keys(decisions.itemSkipped).length}`);
+    }
+
+    let response;
+    try {
+      response = await fetch(`${creds.serverWwwUrl}/api/inspections/v4/save`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${creds.plaintextKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (networkErr) {
+      return { success: false, error: `Network error: ${networkErr.message}`, code: 'NETWORK_ERROR' };
+    }
+
+    if (response.status === 401) {
+      console.log('[auth] 401 detected during v4-save — clearing credentials, prompting re-login');
+      await credentialStore.clearCredentials();
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'AUTH_EXPIRED', code: 'AUTH_EXPIRED' };
+    }
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      const detail = err.error || `HTTP ${response.status}`;
+      return { success: false, error: detail };
+    }
+
+    const data = await response.json();
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 // Parse a PDF file and extract inspection text
 ipcMain.handle('parse-pdf', async (event, filePath) => {
   try {
