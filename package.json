@@ -1,6 +1,6 @@
 {
   "name": "inspection-review-app",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "AI-powered property inspection review tool",
   "main": "src/main.js",
   "scripts": {
