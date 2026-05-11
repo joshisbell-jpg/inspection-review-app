@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('api', {
   // Send inspection data + results to KeepSimpleCRM
   sendToCrm: (data) => ipcRenderer.invoke('send-to-crm', data),
 
+  // Send V4 review (Mission 9 Phase B.2 / Mission 7.2 Phase C). V4 has its
+  // own decision map shape (bucketDecisions / itemDecisions / itemSkipped)
+  // and goes to /api/inspections/v4/save instead of /api/inspections/ai-review.
+  sendV4ToCrm: (data) => ipcRenderer.invoke('send-v4-to-crm', data),
+
   // Listen for progress updates
   onProgress: (callback) => {
     ipcRenderer.on('progress', (event, data) => callback(data));
@@ -60,4 +65,18 @@ contextBridge.exposeInMainWorld('api', {
   // https://www.keepsimplecrm.com/* is allowed. Used for the forgot-
   // password link.
   openExternalUrl: (url) => ipcRenderer.invoke('open-external-url', url),
+
+  // ----- Mission 10 Workstream B — inspection-review:// deep-link handoff -----
+
+  // Subscribe to inspection-import deep links. Callback receives
+  // { platform: 'appfolio'|'zinspector', urls: string[] }. The renderer
+  // should call deepLinkRendererReady() once it has installed this
+  // listener so the main process can flush any link buffered during
+  // cold-start.
+  onInspectionImportDeepLink: (callback) => {
+    ipcRenderer.on('inspection-import-deep-link', (_event, payload) => callback(payload));
+  },
+
+  // Tell main process the renderer is ready to receive deep-link events.
+  deepLinkRendererReady: () => ipcRenderer.send('deep-link-renderer-ready'),
 });

@@ -90,6 +90,133 @@ async function applyStealthMode(page) {
   });
 }
 
+// ============================================
+// Mission 10 Workstream B — inspection-review:// deep-link handoff
+// ============================================
+//
+// The web /ai-review/new "Link to Inspection" tab fires
+//   inspection-review://import?platform=appfolio&urls=URL1,URL2
+// to hand off scraping to this Electron app (which has the inspector's
+// AppFolio / zInspector session cookies). Cold-start: protocol URL
+// arrives via process.argv on Windows. Warm-start: the URL arrives via
+// the `second-instance` event (Windows / Linux) or `open-url` event
+// (macOS). The handler forwards the parsed payload to the renderer
+// over an IPC channel; renderer populates current-link + previous-links
+// and runs the existing processInspections() flow unchanged.
+//
+// Single-instance lock prevents the OS from spawning a second app
+// instance when the user clicks a deep link with the app already open —
+// the existing instance picks up the URL via second-instance.
+
+let pendingDeepLink = null; // payload buffered until renderer is ready
+let rendererReady = false;
+
+function parseDeepLink(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'inspection-review:') return null;
+    // We only accept inspection-review://import for now. Future actions
+    // (e.g., open-review/, settings/) can branch on hostname.
+    if (u.hostname !== 'import') return null;
+    const platform = (u.searchParams.get('platform') || '').toLowerCase();
+    const urlsParam = u.searchParams.get('urls') || '';
+    const urls = urlsParam
+      .split(',')
+      .map((s) => decodeURIComponent(s.trim()))
+      .filter((s) => s.length > 0);
+    if (!['appfolio', 'zinspector'].includes(platform)) return null;
+    if (urls.length === 0) return null;
+    return { platform, urls };
+  } catch (err) {
+    console.warn('[deep-link] parse failed:', err && err.message);
+    return null;
+  }
+}
+
+function dispatchDeepLink(payload) {
+  if (!payload) return;
+  if (mainWindow && rendererReady) {
+    try {
+      mainWindow.webContents.send('inspection-import-deep-link', payload);
+      mainWindow.focus();
+    } catch (err) {
+      console.warn('[deep-link] dispatch failed:', err && err.message);
+    }
+  } else {
+    pendingDeepLink = payload;
+  }
+}
+
+function findDeepLinkInArgv(argv) {
+  if (!Array.isArray(argv)) return null;
+  for (const arg of argv) {
+    if (typeof arg === 'string' && arg.startsWith('inspection-review://')) {
+      const parsed = parseDeepLink(arg);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+// Register the custom protocol. On Windows this writes to the registry
+// at install time (electron-builder handles it for packaged builds; dev
+// runs use the live-registration here, scoped to the current exe path).
+// On macOS this is registered via the Info.plist by electron-builder;
+// the setAsDefaultProtocolClient call is still a no-op-safe dev hint.
+if (process.defaultApp && process.argv.length >= 2) {
+  // Dev mode: pass the script path so the OS can re-launch us correctly.
+  app.setAsDefaultProtocolClient('inspection-review', process.execPath, [
+    path.resolve(process.argv[1]),
+  ]);
+} else {
+  app.setAsDefaultProtocolClient('inspection-review');
+}
+
+// Single-instance lock. If we can't acquire it, another instance is
+// already running — it will receive our argv via `second-instance`.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv /*, workingDirectory */) => {
+    // Another launch attempt while we're already running — pull the
+    // deep link out of the new argv if present, then re-focus.
+    const payload = findDeepLinkInArgv(argv);
+    dispatchDeepLink(payload);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+
+  // macOS: deep-link arrives as an open-url event rather than via argv.
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    const payload = parseDeepLink(url);
+    dispatchDeepLink(payload);
+  });
+}
+
+// Cold-start parse — capture any deep link from our initial argv now so
+// that whenever the renderer signals ready, we can dispatch it.
+const initialDeepLink = findDeepLinkInArgv(process.argv);
+if (initialDeepLink) {
+  pendingDeepLink = initialDeepLink;
+}
+
+// Renderer announces readiness via this one-way IPC. We then flush any
+// buffered deep link. This is preferable to relying on did-finish-load
+// because the renderer can install its own event listener BEFORE telling
+// us it's ready.
+ipcMain.on('deep-link-renderer-ready', () => {
+  rendererReady = true;
+  if (pendingDeepLink) {
+    const payload = pendingDeepLink;
+    pendingDeepLink = null;
+    dispatchDeepLink(payload);
+  }
+});
+
 // Create the main app window
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -107,9 +234,19 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  // Reset rendererReady when the window reloads — old renderer is gone.
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererReady = false;
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    rendererReady = false;
+  });
 }
 
-app.whenReady().then(createWindow);
+if (gotSingleInstanceLock) {
+  app.whenReady().then(createWindow);
+}
 
 app.on('window-all-closed', async () => {
   if (browserInstance) {
@@ -473,6 +610,88 @@ ipcMain.handle('fetch-inspection', async (event, url) => {
  *   NETWORK_ERROR     — fetch threw (DNS/refused/offline).
  *   (no .code)        — proxy 4xx/5xx with .message for the UI.
  */
+/**
+ * Mission 7.2 Phase B — call the server-side V4 orchestrator with locally
+ * extracted PDF text. The server runs the V4 prompt + assembleV4Blob and
+ * returns a fully-typed V4IssuesBlob plus parseStats / addressSource /
+ * tokenUsage metadata. PDF bytes never leave the user's machine — the
+ * inspector's pdf-parse output is the entire payload.
+ *
+ * input: {
+ *   pdfText: string,
+ *   pdfParseStats: { pages, chars },
+ *   comparisonPdfTexts: [{ text, parseStats: { pages, chars } }],
+ *   propertyAddress?: string,
+ *   context?: { unit, tenant, leaseDuration },
+ * }
+ *
+ * Errors carry .code matching callClaude's contract:
+ *   NOT_AUTHENTICATED — no creds on disk
+ *   AUTH_EXPIRED      — server returned 401
+ *   NETWORK_ERROR     — fetch threw
+ *   (no .code)        — server 4xx/5xx
+ */
+async function runV4ViaServer(input) {
+  const creds = await credentialStore.readCredentials();
+  if (!creds) {
+    mainWindow?.webContents.send('auth-expired');
+    const e = new Error('Not authenticated');
+    e.code = 'NOT_AUTHENTICATED';
+    throw e;
+  }
+
+  const body = {
+    pdfText: input.pdfText,
+    pdfParseStats: input.pdfParseStats,
+  };
+  if (Array.isArray(input.comparisonPdfTexts) && input.comparisonPdfTexts.length > 0) {
+    body.comparisonPdfTexts = input.comparisonPdfTexts;
+  }
+  if (input.propertyAddress) body.propertyAddress = input.propertyAddress;
+  if (input.context) body.context = input.context;
+
+  const totalChars = body.pdfText.length
+    + (body.comparisonPdfTexts ?? []).reduce((s, c) => s + (c.text?.length || 0), 0);
+  console.log(`[ai-review] V4 heavy-PDF — POST /v4/run with ~${totalChars} chars`);
+
+  let response;
+  try {
+    response = await fetch(`${creds.serverWwwUrl}/api/inspections/v4/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${creds.plaintextKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (networkErr) {
+    const e = new Error(`Network error contacting /v4/run: ${networkErr.message}`);
+    e.code = 'NETWORK_ERROR';
+    throw e;
+  }
+
+  if (response.status === 401) {
+    console.log('[auth] 401 detected during /v4/run — clearing credentials, prompting re-login');
+    await credentialStore.clearCredentials();
+    mainWindow?.webContents.send('auth-expired');
+    const e = new Error('Auth expired');
+    e.code = 'AUTH_EXPIRED';
+    throw e;
+  }
+
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const err = await response.json();
+      if (err?.error) detail = String(err.error);
+      if (err?.detail) detail += ` — ${err.detail}`;
+    } catch { /* body not JSON */ }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
 async function callClaude(anthropicMessages) {
   const creds = await credentialStore.readCredentials();
   if (!creds) {
@@ -558,11 +777,72 @@ ipcMain.handle('analyze-inspections', async (event, { newInspection, previousIns
 
   // V4 attempt (Mission 9 Phase B.1) — opt-in via AI_REVIEW_FORMAT=v4.
   // No soft-fallback; failures surface explicitly for STOP GATE 2 visibility.
-  // If V4 stabilizes in production, consider adding V4→V3 fallback similar
-  // to V3→V2 below.
+  //
+  // Mission 7.2 Phase B (heavy-PDF path) — when EVERY inspection input was
+  // produced by parse-pdf locally (source === 'pdf'), route through the
+  // server's /api/inspections/v4/run endpoint with the pre-extracted text
+  // instead of the local-prompt + callClaude flow. Server side then runs
+  // the V4 prompt + assembleV4Blob; the PDF bytes never leave the user's
+  // machine, which is what makes 162 MB+ QC files actually work.
+  //
+  // URL-scraped inspections (AppFolio/zInspector) still flow through the
+  // existing local-prompt path because they ship screenshots + tableData
+  // alongside textContent, and /v4/run is text-only today. Mixed modes
+  // (one PDF + one URL) likewise stay on the local path for safety.
   if (aiReviewFormat === 'v4') {
+    const isPdfSource = (inp) => inp && inp.source === 'pdf' && typeof inp.textContent === 'string';
+    const allInputsArePdf = isPdfSource(newInspection)
+      && (previousInspections ?? []).every(isPdfSource);
+
+    if (allInputsArePdf) {
+      try {
+        if (debug) console.log(`[ai-review] V4 heavy-PDF path — comparison=${isComparisonMode}`);
+        const v4Result = await runV4ViaServer({
+          pdfText: newInspection.textContent,
+          pdfParseStats: {
+            pages: newInspection.pageCount || 0,
+            chars: newInspection.textContent.length,
+          },
+          comparisonPdfTexts: (previousInspections ?? []).map((p) => ({
+            text: p.textContent,
+            parseStats: { pages: p.pageCount || 0, chars: p.textContent.length },
+          })),
+          propertyAddress: newInspection.property?.address,
+          context,
+        });
+        if (debug) {
+          console.log(`[ai-review] V4 heavy-PDF — total=${v4Result.v4Result.totalIssues}, ` +
+            `buckets=${v4Result.v4Result.buckets.length}/8, ` +
+            `serverParseStats=${v4Result.parseStats.pages}p/${v4Result.parseStats.chars}c`);
+        }
+        return {
+          success: true,
+          result: {
+            format: 'v4',
+            // /v4/run returns address resolution + token usage too — preserve
+            // for the renderer's address-source badge and telemetry display.
+            overall_condition: null,
+            summary: null,
+            issues: v4Result.v4Result,
+            // Mission 7.2 Phase B extras — not present in the local-prompt
+            // path; renderer should treat as optional.
+            _serverParseStats: v4Result.parseStats,
+            _serverAddressSource: v4Result.addressSource,
+            _serverTokenUsage: v4Result.tokenUsage,
+          },
+        };
+      } catch (v4Error) {
+        if (v4Error.code === 'AUTH_EXPIRED' || v4Error.code === 'NOT_AUTHENTICATED') {
+          return { success: false, error: v4Error.code };
+        }
+        console.error('[ai-review] V4 heavy-PDF path failed:', v4Error.message);
+        return { success: false, error: v4Error.message };
+      }
+    }
+
+    // URL-scrape (or mixed) V4 path: existing local-prompt flow.
     try {
-      if (debug) console.log(`[ai-review] V4 prompt — comparison=${isComparisonMode}`);
+      if (debug) console.log(`[ai-review] V4 local-prompt path — comparison=${isComparisonMode}`);
       const v4Messages = isComparisonMode
         ? buildV4ComparisonMessages(newInspection, previousInspections, context)
         : buildV4SingleInspectionMessages(newInspection, context);
@@ -825,6 +1105,108 @@ ipcMain.handle('send-to-crm', async (event, { currentInspection, previousInspect
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return { success: false, error: err.error || `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+/**
+ * V4 save (Mission 7.2 Phase C / Mission 9 Phase B.2 Sub-Batch C). Routes the
+ * client's V4DecisionMap to /api/inspections/v4/save instead of /api/inspections/
+ * ai-review. The server applies cascade + skip-mutex via applyV4Decisions and
+ * persists the merged blob; we just hand over the unmerged decision map plus
+ * the V4IssuesBlob the user reviewed.
+ *
+ * Auth: per-user Bearer key from credentialStore (same pattern as runV4ViaServer
+ * and the legacy send-to-crm). 401 wipes credentials + emits auth-expired so
+ * the renderer drops back to login screen WITHOUT clearing in-memory inspection
+ * state (user can re-login and click Save to CRM again with decisions intact —
+ * see B6 onAuthExpired contract).
+ *
+ * Returns same shape as send-to-crm: {success, data?, error?} so the renderer
+ * dispatch is symmetrical.
+ */
+ipcMain.handle('send-v4-to-crm', async (event, payload) => {
+  try {
+    const creds = await credentialStore.readCredentials();
+    if (!creds) {
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'NOT_AUTHENTICATED' };
+    }
+
+    // Validate the minimum payload shape — sessionId / v4Result / decisions
+    // are required; everything else is optional. The server runs full Zod
+    // validation, but we surface client-side mistakes with a clear error
+    // before round-tripping to the network.
+    if (!payload || typeof payload !== 'object') {
+      return { success: false, error: 'V4 save payload missing' };
+    }
+    const { sessionId, v4Result, decisions, propertyAddress, addressSource,
+      parseStats, tokenUsage, context } = payload;
+    if (!sessionId || typeof sessionId !== 'string') {
+      return { success: false, error: 'V4 save: sessionId missing' };
+    }
+    if (!v4Result || v4Result.formatVersion !== 'v4' || !Array.isArray(v4Result.buckets)) {
+      return { success: false, error: 'V4 save: v4Result missing or wrong format' };
+    }
+    if (!decisions || typeof decisions !== 'object'
+        || typeof decisions.bucketDecisions !== 'object'
+        || typeof decisions.itemDecisions !== 'object'
+        || typeof decisions.itemSkipped !== 'object') {
+      return { success: false, error: 'V4 save: decisions map malformed' };
+    }
+
+    const body = {
+      sessionId,
+      v4Result,
+      decisions,
+      propertyAddress: propertyAddress || '',
+      addressSource: addressSource || 'caller',
+      parseStats: parseStats || { pages: 0, chars: 0 },
+    };
+    if (tokenUsage) body.tokenUsage = tokenUsage;
+    if (context && Object.keys(context).length > 0) body.context = context;
+    // Electron heavy-PDF flow has no blob URL — PDF stays on user's machine.
+    // primaryBlobUrl / comparisonBlobUrls are optional in v4SaveBodySchema, so
+    // we omit them entirely.
+
+    const debug = process.env.AI_REVIEW_DEBUG === 'true';
+    if (debug) {
+      console.log(`[v4-save] sessionId=${sessionId} buckets=${v4Result.buckets.length} ` +
+        `bucketDecisions=${Object.keys(decisions.bucketDecisions).length} ` +
+        `itemDecisions=${Object.keys(decisions.itemDecisions).length} ` +
+        `itemSkipped=${Object.keys(decisions.itemSkipped).length}`);
+    }
+
+    let response;
+    try {
+      response = await fetch(`${creds.serverWwwUrl}/api/inspections/v4/save`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${creds.plaintextKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (networkErr) {
+      return { success: false, error: `Network error: ${networkErr.message}`, code: 'NETWORK_ERROR' };
+    }
+
+    if (response.status === 401) {
+      console.log('[auth] 401 detected during v4-save — clearing credentials, prompting re-login');
+      await credentialStore.clearCredentials();
+      mainWindow?.webContents.send('auth-expired');
+      return { success: false, error: 'AUTH_EXPIRED', code: 'AUTH_EXPIRED' };
+    }
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      const detail = err.error || `HTTP ${response.status}`;
+      return { success: false, error: detail };
     }
 
     const data = await response.json();
